@@ -31,7 +31,22 @@ A WiFi to Ethernet bridge implementation for the ESP32-S3-ETH (Waveshare) board 
 
 ### Configuration
 
-Edit `platformio.ini` to set your WiFi credentials and target IP:
+**Option 1: Environment Variables (Recommended)**
+
+Set environment variables before building:
+
+```bash
+export WIFI_SSID="YourNetworkSSID"
+export WIFI_PASSWORD="YourNetworkPassword"
+export TARGET_IP="192.168.91.1"
+
+# Build the project
+pio run
+```
+
+**Option 2: Edit platformio.ini**
+
+Edit the build flags in `platformio.ini`, but be careful not to commit credentials:
 
 ```ini
 build_flags = 
@@ -39,6 +54,8 @@ build_flags =
     -DWIFI_PASSWORD=\"YourNetworkPassword\"
     -DTARGET_IP=\"192.168.91.1\"
 ```
+
+**Note:** The platformio.ini file uses environment variables by default. If an environment variable is not set, it will use the default value shown.
 
 ### Building
 

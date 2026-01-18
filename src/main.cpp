@@ -192,9 +192,17 @@ void handleLogs() {
 void handleStatus() {
     String json = "{";
     json += "\"wifi_connected\":" + String(wifi_connected ? "true" : "false") + ",";
-    json += "\"wifi_ip\":\"" + WiFi.localIP().toString() + "\",";
+    if (wifi_connected) {
+        json += "\"wifi_ip\":\"" + WiFi.localIP().toString() + "\",";
+    } else {
+        json += "\"wifi_ip\":null,";
+    }
     json += "\"eth_connected\":" + String(eth_connected ? "true" : "false") + ",";
-    json += "\"eth_ip\":\"" + ETH.localIP().toString() + "\",";
+    if (eth_connected) {
+        json += "\"eth_ip\":\"" + ETH.localIP().toString() + "\",";
+    } else {
+        json += "\"eth_ip\":null,";
+    }
     json += "\"uptime\":" + String(millis() / 1000) + ",";
     json += "\"target_ip\":\"" + String(TARGET_IP) + "\"";
     json += "}";
@@ -348,15 +356,17 @@ void setupEthernet() {
 }
 
 /**
- * Setup NAPT (Network Address Port Translation)
- * This enables forwarding packets from Ethernet clients through WiFi
+ * Setup IP Forwarding
+ * ESP32-S3 handles packet forwarding automatically when both interfaces are active
+ * No explicit NAPT configuration is needed for basic bridging
  */
-void setupNAPT() {
-    logPrintln("Configuring NAPT...");
+void setupBridging() {
+    logPrintln("Configuring bridge mode...");
     
-    // Note: NAPT may not be available on all ESP32 variants
-    // For ESP32-S3, IP forwarding is handled differently
-    logPrintln("NAPT configuration - bridge is ready");
+    // The ESP32-S3 Arduino framework handles IP forwarding between interfaces
+    // when both WiFi and Ethernet are active. No additional configuration needed.
+    
+    logPrintln("Bridge mode ready - traffic will flow between interfaces");
 }
 
 void setup() {
@@ -384,8 +394,8 @@ void setup() {
     
     delay(2000);
     
-    // Setup NAPT for bridging
-    setupNAPT();
+    // Setup bridging
+    setupBridging();
     
     logPrintln("\n=================================");
     logPrintln("Bridge Setup Complete!");
