@@ -24,6 +24,7 @@ extern "C" {
 #include "lwip/lwip_napt.h"
 #include "lwip/dns.h"
 #include "lwip/ip_addr.h"
+#include "lwip/tcpip.h"
 }
 
 // Configuration from build flags
@@ -118,6 +119,14 @@ void logPrintln(const String& message) {
 }
 
 /**
+ * Callback function to enable NAPT (called from lwIP thread context)
+ */
+static void napt_enable_callback(void *arg) {
+    uint32_t ip = *(uint32_t *)arg;
+    ip_napt_enable(ip, 1);
+}
+
+/**
  * Enable NAPT (Network Address Port Translation) for packet forwarding
  * This allows Ethernet clients to access the WiFi network and target IP
  */
@@ -137,11 +146,11 @@ void enableNAPT() {
     // Enable NAPT on the WiFi interface (upstream)
     // This allows packets from Ethernet to be forwarded to WiFi with address translation
     IPAddress wifi_ip = WiFi.localIP();
+    uint32_t ip_val = (uint32_t)wifi_ip;
     
-    // Must lock TCPIP core before calling lwIP NAPT functions
-    LOCK_TCPIP_CORE();
-    ip_napt_enable(wifi_ip, 1);
-    UNLOCK_TCPIP_CORE();
+    // Use tcpip_callback to call ip_napt_enable from the correct thread context
+    // This is the thread-safe way to call lwIP functions
+    tcpip_callback(napt_enable_callback, &ip_val);
     
     Serial.println("NAPT enabled on WiFi interface");
     Serial.print("Forwarding Ethernet traffic through WiFi (");
