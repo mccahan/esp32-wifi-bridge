@@ -302,6 +302,8 @@ void EthernetEvent(WiFiEvent_t event) {
  * Initialize WiFi in Station mode
  */
 void setupWiFi() {
+    Serial.println("Setting up WiFi...");
+    Serial.flush();
     logPrintln("Setting up WiFi...");
     
     // Register event handlers
@@ -311,6 +313,9 @@ void setupWiFi() {
     WiFi.mode(WIFI_STA);
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
     
+    Serial.print("Connecting to WiFi SSID: ");
+    Serial.println(WIFI_SSID);
+    Serial.flush();
     logPrint("Connecting to WiFi SSID: ");
     logPrintln(WIFI_SSID);
     
@@ -318,17 +323,29 @@ void setupWiFi() {
     int attempts = 0;
     while (WiFi.status() != WL_CONNECTED && attempts < 30) {
         delay(1000);
+        Serial.print(".");
         logPrint(".");
         attempts++;
     }
+    Serial.println();
+    Serial.flush();
     
     if (WiFi.status() == WL_CONNECTED) {
+        Serial.println("\nWiFi connected successfully");
+        Serial.print("IP address: ");
+        Serial.println(WiFi.localIP());
+        Serial.print("MAC address: ");
+        Serial.println(WiFi.macAddress());
+        Serial.flush();
+        
         logPrintln("\nWiFi connected successfully");
         logPrint("IP address: ");
         logPrintln(WiFi.localIP().toString());
         logPrint("MAC address: ");
         logPrintln(WiFi.macAddress());
     } else {
+        Serial.println("\nFailed to connect to WiFi");
+        Serial.flush();
         logPrintln("\nFailed to connect to WiFi");
     }
 }
@@ -337,12 +354,16 @@ void setupWiFi() {
  * Initialize Ethernet
  */
 void setupEthernet() {
+    Serial.println("Setting up Ethernet...");
+    Serial.flush();
     logPrintln("Setting up Ethernet...");
     
     // Register event handler
     WiFi.onEvent(EthernetEvent);
     
     // Initialize SPI for W5500
+    Serial.println("Initializing SPI bus...");
+    Serial.flush();
     logPrintln("Initializing SPI bus...");
     SPI.begin(ETH_SCLK_GPIO, ETH_MISO_GPIO, ETH_MOSI_GPIO, ETH_CS_GPIO);
     
@@ -351,9 +372,17 @@ void setupEthernet() {
     
     // Initialize Ethernet with W5500 via SPI
     // ESP32-S3-ETH uses W5500 chip, not RMII PHY
+    Serial.println("Initializing W5500 Ethernet chip...");
+    Serial.flush();
     logPrintln("Initializing W5500 Ethernet chip...");
     // ETH.begin signature: (type, phy_addr, cs, irq, rst, spi, spi_freq_mhz)
     if (!ETH.begin(ETH_PHY_W5500, 1, ETH_CS_GPIO, ETH_INT_GPIO, ETH_RST_GPIO, SPI, ETH_SPI_CLOCK_MHZ)) {
+        Serial.println("ETH initialization failed!");
+        Serial.println("Check W5500 SPI connections:");
+        Serial.println("  MISO: GPIO12, MOSI: GPIO11, SCLK: GPIO13");
+        Serial.println("  CS: GPIO14, RST: GPIO9, INT: GPIO10");
+        Serial.flush();
+        
         logPrintln("ETH initialization failed!");
         logPrintln("Check W5500 SPI connections:");
         logPrintln("  MISO: GPIO12, MOSI: GPIO11, SCLK: GPIO13");
@@ -364,16 +393,37 @@ void setupEthernet() {
     // Set hostname after initialization
     ETH.setHostname("esp32-bridge");
     
+    Serial.println("W5500 Ethernet initialized - waiting for DHCP...");
+    Serial.flush();
     logPrintln("W5500 Ethernet initialized - waiting for DHCP...");
 }
 
 void setup() {
-    // Initialize Serial
+    // Initialize Serial and wait for it to be ready
     Serial.begin(115200);
+    
+    // For ESP32-S3 with USB CDC, wait for Serial to be ready
+    unsigned long start = millis();
+    while (!Serial && (millis() - start < 5000)) {
+        delay(100);
+    }
     delay(1000);
+    
+    // Send initial newlines to ensure clean output
+    Serial.println();
+    Serial.println();
+    Serial.flush();
     
     // Enable log buffering
     logBufferEnabled = true;
+    
+    Serial.println("\n\n=================================");
+    Serial.println("ESP32-S3-POE-ETH WiFi Bridge");
+    Serial.println("=================================");
+    Serial.print("Target IP: ");
+    Serial.println(TARGET_IP);
+    Serial.println("");
+    Serial.flush();
     
     logPrintln("\n\n=================================");
     logPrintln("ESP32-S3-POE-ETH WiFi Bridge");
@@ -411,6 +461,25 @@ void loop() {
     // Monitor connection status
     static unsigned long lastPrint = 0;
     if (millis() - lastPrint > 10000) {  // Print every 10 seconds
+        Serial.println("=== Status ===");
+        Serial.print("WiFi: ");
+        Serial.println(wifi_connected ? "Connected" : "Disconnected");
+        Serial.print("Ethernet: ");
+        Serial.println(eth_connected ? "Connected" : "Disconnected");
+        
+        if (wifi_connected) {
+            Serial.print("WiFi IP: ");
+            Serial.println(WiFi.localIP());
+        }
+        
+        if (eth_connected) {
+            Serial.print("ETH IP: ");
+            Serial.println(ETH.localIP());
+        }
+        
+        Serial.println("==============\n");
+        Serial.flush();
+        
         logPrintln("=== Status ===");
         logPrint("WiFi: ");
         logPrintln(wifi_connected ? "Connected" : "Disconnected");
