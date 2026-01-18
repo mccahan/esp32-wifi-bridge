@@ -73,6 +73,11 @@ bool logBufferEnabled = false;
 static bool eth_connected = false;
 static bool wifi_connected = false;
 static bool napt_enabled = false;
+static bool web_server_started = false;
+
+// Flags for deferred initialization (set in ISR, processed in loop)
+static volatile bool need_napt_check = false;
+static volatile bool need_web_server_start = false;
 
 // Forward declarations
 void logPrint(const String& message);
@@ -330,8 +335,8 @@ void WiFiEvent(WiFiEvent_t event) {
             logPrintln(WiFi.localIP().toString());
             wifi_connected = true;
             
-            // Try to enable NAPT if Ethernet is also ready
-            enableNAPT();
+            // Schedule NAPT check (don't do it in interrupt context)
+            need_napt_check = true;
             
             logPrintln("WiFi interface ready for bridging");
             break;
@@ -339,6 +344,7 @@ void WiFiEvent(WiFiEvent_t event) {
             logPrintln("WiFi Disconnected - Reconnecting...");
             wifi_connected = false;
             napt_enabled = false;  // Reset NAPT state when WiFi disconnects
+            need_napt_check = false;  // Cancel pending NAPT check
             WiFi.reconnect();
             break;
         default:
@@ -371,16 +377,16 @@ void EthernetEvent(WiFiEvent_t event) {
             // Configure routing
             logPrintln("Ethernet interface ready");
             
-            // Try to enable NAPT if WiFi is also ready
-            enableNAPT();
-            
-            // Start web server once we have an Ethernet IP
-            setupWebServer();
+            // Schedule NAPT and web server (don't do it in interrupt context)
+            need_napt_check = true;
+            need_web_server_start = true;
             break;
         case ARDUINO_EVENT_ETH_DISCONNECTED:
             logPrintln("ETH Disconnected");
             eth_connected = false;
             napt_enabled = false;  // Reset NAPT state when Ethernet disconnects
+            need_napt_check = false;  // Cancel pending NAPT check
+            need_web_server_start = false;  // Cancel pending web server start
             break;
         case ARDUINO_EVENT_ETH_STOP:
             logPrintln("ETH Stopped");
@@ -547,8 +553,22 @@ void setup() {
 }
 
 void loop() {
+    // Process deferred initialization (must be done outside interrupt context)
+    if (need_web_server_start && !web_server_started && eth_connected) {
+        need_web_server_start = false;
+        setupWebServer();
+        web_server_started = true;
+    }
+    
+    if (need_napt_check) {
+        need_napt_check = false;
+        enableNAPT();
+    }
+    
     // Handle web server requests
-    server.handleClient();
+    if (web_server_started) {
+        server.handleClient();
+    }
     
     // Monitor connection status
     static unsigned long lastPrint = 0;
