@@ -3,6 +3,7 @@
 #include <WiFiClient.h>
 #include <ESPmDNS.h>
 #include <SPI.h>
+#include "config.h"
 #include "cert.h"
 #include <lwip/sockets.h>
 
@@ -10,12 +11,12 @@
 #define DEBUG_ETHERNET_WEBSERVER_PORT Serial
 #define _ETHERNET_WEBSERVER_LOGLEVEL_ 3
 
-// Define custom SPI pins for ESP32-S3-POE-ETH
-#define INT_GPIO    10
-#define MISO_GPIO   12
-#define MOSI_GPIO   11
-#define SCK_GPIO    13
-#define CS_GPIO     14
+// Define custom SPI pins for ESP32-S3-POE-ETH from config
+#define INT_GPIO    W5500_INT_GPIO
+#define MISO_GPIO   W5500_MISO_GPIO
+#define MOSI_GPIO   W5500_MOSI_GPIO
+#define SCK_GPIO    W5500_SCK_GPIO
+#define CS_GPIO     W5500_CS_GPIO
 
 #define USE_ETHERNET_WRAPPER  true
 #include <WebServer_ESP32_SC_W5500.h>
@@ -38,19 +39,14 @@
  * TLS encryption is handled end-to-end between the client and the Powerwall.
  */
 
-// WiFi credentials for connecting to Powerwall AP
-const char* wifi_ssid = "TeslaPowerwall";
-const char* wifi_password = "";
-
 // MAC address for W5500
-byte mac[] = { 0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED };
+byte mac[] = ETH_MAC_ADDR;
 
 // Powerwall IP on WiFi network
-IPAddress powerwallIP(192, 168, 91, 1);
+IPAddress powerwallIP(POWERWALL_IP_ADDR1, POWERWALL_IP_ADDR2, POWERWALL_IP_ADDR3, POWERWALL_IP_ADDR4);
 
-// TCP server socket on port 443
+// TCP server socket
 int serverSocket = -1;
-const uint16_t SERVER_PORT = 443;
 
 bool ethConnected = false;
 
@@ -81,10 +77,10 @@ void setupEthernet() {
 
 void setupWiFi() {
     Serial.print("Connecting to WiFi: ");
-    Serial.println(wifi_ssid);
+    Serial.println(WIFI_SSID);
     
     WiFi.mode(WIFI_STA);
-    WiFi.begin(wifi_ssid, wifi_password);
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
     
     int attempts = 0;
     while (WiFi.status() != WL_CONNECTED && attempts < 30) {
@@ -103,15 +99,22 @@ void setupWiFi() {
 }
 
 void setupMDNS() {
-    if (!MDNS.begin("powerwall")) {
+    if (!MDNS.begin(MDNS_HOSTNAME)) {
         Serial.println("Error setting up mDNS");
         return;
     }
     
     // Advertise _powerwall service
-    MDNS.addService("_powerwall", "_tcp", 443);
-    Serial.println("mDNS responder started: powerwall.local");
-    Serial.println("Advertising _powerwall._tcp service on port 443");
+    MDNS.addService(MDNS_SERVICE, MDNS_PROTOCOL, PROXY_PORT);
+    Serial.print("mDNS responder started: ");
+    Serial.print(MDNS_HOSTNAME);
+    Serial.println(".local");
+    Serial.print("Advertising ");
+    Serial.print(MDNS_SERVICE);
+    Serial.print(".");
+    Serial.print(MDNS_PROTOCOL);
+    Serial.print(" service on port ");
+    Serial.println(PROXY_PORT);
 }
 
 void setupTCPServer() {
@@ -130,12 +133,12 @@ void setupTCPServer() {
     int flags = fcntl(serverSocket, F_GETFL, 0);
     fcntl(serverSocket, F_SETFL, flags | O_NONBLOCK);
     
-    // Bind to port 443
+    // Bind to port
     struct sockaddr_in serverAddr;
     memset(&serverAddr, 0, sizeof(serverAddr));
     serverAddr.sin_family = AF_INET;
     serverAddr.sin_addr.s_addr = INADDR_ANY;
-    serverAddr.sin_port = htons(SERVER_PORT);
+    serverAddr.sin_port = htons(PROXY_PORT);
     
     if (bind(serverSocket, (struct sockaddr*)&serverAddr, sizeof(serverAddr)) < 0) {
         Serial.println("Bind failed");
@@ -152,7 +155,8 @@ void setupTCPServer() {
         return;
     }
     
-    Serial.println("TCP Server started on port 443");
+    Serial.print("TCP Server started on port ");
+    Serial.println(PROXY_PORT);
 }
 
 void setup() {
@@ -201,7 +205,7 @@ void handleClient(int clientSocket) {
     // Proxy data bidirectionally
     uint8_t buf[1024];
     unsigned long timeout = millis();
-    const unsigned long TIMEOUT_MS = 30000;
+    const unsigned long TIMEOUT_MS = PROXY_TIMEOUT_MS;
     
     while (true) {
         bool activity = false;
