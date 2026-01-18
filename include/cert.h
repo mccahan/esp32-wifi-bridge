@@ -1,42 +1,13 @@
 #ifndef CERT_H
 #define CERT_H
 
-// Self-signed certificate for HTTPS server
-// Note: W5500 doesn't support hardware TLS/SSL
-// This certificate is provided for reference if implementing software TLS
+// Self-signed certificate for HTTPS server (TLS termination)
+// This certificate is used by the ESP32-S3 to accept HTTPS connections on the Ethernet side
 
-const char* server_cert = 
-"-----BEGIN CERTIFICATE-----\n"
-"MIICOjCCAaOgAwIBAgIBADANBgkqhkiG9w0BAQ0FADA6MQswCQYDVQQGEwJ1czEL\n"
-"MAkGA1UECAwCQ08xDjAMBgNVBAoMBVByb3h5MQ4wDAYDVQQDDAVwcm94eTAeFw0y\n"
-"NjAxMTgwNTQyMjJaFw0zNjAxMTYwNTQyMjJaMDoxCzAJBgNVBAYTAnVzMQswCQYD\n"
-"VQQIDAJDTzEOMAwGA1UECgwFUHJveHkxDjAMBgNVBAMMBXByb3h5MIGfMA0GCSqG\n"
-"SIb3DQEBAQUAA4GNADCBiQKBgQDLSQHzr/dtW9hg5rPyEG/OBQkAlnkD/uQk61MJ\n"
-"XiDZWCok/nSgXFI9KbJUfM+llSkmEHWRsyb4h11WOr3xJe8iNv5sCK8eu9gaqtDE\n"
-"oY/qB7gj6mXXOCDrwjoryDP67laOGegIrIuezQILc9I6Z9xuOauajYKQotisM8di\n"
-"1bDWCQIDAQABo1AwTjAdBgNVHQ4EFgQUCAdFf2VhsCQZRl/VUYs+1RezseMwHwYD\n"
-"VR0jBBgwFoAUCAdFf2VhsCQZRl/VUYs+1RezseMwDAYDVR0TBAUwAwEB/zANBgkq\n"
-"hkiG9w0BAQ0FAAOBgQCdelQXBnexlp/qxywKKl9lN2BpU+8sfBWiCdTarStBj3NC\n"
-"0i+S1BfYgUHmiItRRFXtl2+mniaTcCMB8edEa5N8RQW/G3jUQSOW3GqvnnI4KIYz\n"
-"W9DSO6ExP+OJGbvbJnrSMdgo5ughRWwNcuLAfBJAceFTOMnuVfAxf3Xc5DrDPg==\n"
-"-----END CERTIFICATE-----\n";
-
-const char* server_key = 
-"-----BEGIN PRIVATE KEY-----\n"
-"MIICdwIBADANBgkqhkiG9w0BAQEFAASCAmEwggJdAgEAAoGBAMtJAfOv921b2GDm\n"
-"s/IQb84FCQCWeQP+5CTrUwleINlYKiT+dKBcUj0pslR8z6WVKSYQdZGzJviHXVY6\n"
-"vfEl7yI2/mwIrx672Bqq0MShj+oHuCPqZdc4IOvCOivIM/ruVo4Z6Aisi57NAgtz\n"
-"0jpn3G45q5qNgpCi2Kwzx2LVsNYJAgMBAAECgYEAt7QKJ4VlO1Y8e5UAGEfyQWMb\n"
-"d4SDZ7D3ysU+DMEbPk4GB9hK3H+RceQ0W1VO8HuS6+sD097p4L2zAzGiZEG7jrqT\n"
-"rkOQlqx82WQuj4JD5b9vEC3G4QkCLcpFX0v87XRZ1i3RnurgoP271es09Xrcgy4n\n"
-"QqWTT6RFkbZXY175p4ECQQD0FlkcEwX2XRaLQbYCJ1nkMw0voCqNQWqWa4f23enH\n"
-"0PlmN94W3oKKsJRyrEm3GrMdMIGmwcg+fT1OFyxCZ73lAkEA1TTfrdnZFi0mWoTX\n"
-"A3hMEdzs1OJzXjGsV9CI+jEyp02MpWhAuzuQzXvy13dXA+E+BZP1DhR61GAt8CB9\n"
-"KU8VVQJBAO5VQ/1dtdyxWGnxZ78CnYttLdrrEaGL1n+5z7EFTliFfICK3JiH+/9g\n"
-"HBM8l13q/CnsSyyA2v3pXAr8JYNRuOECQCD32hax9wWc2a9ply3sLicc+Go60ggg\n"
-"ujuh/Wxiqyh/r13sbwYEwfFkVzrGM2hgLg0CwgP5Wrz4WmIlQ/VdSzkCQAI/sQrA\n"
-"SJAeO8/YXEllWstnL1ONzXxc4HYzKyyNcbKTs0Jt8kb1/OUrH07iCPKhmb6i7EhW\n"
-"B4E8jFldVMb9Pqc=\n"
-"-----END PRIVATE KEY-----\n";
+// External declarations for certificate and key embedded in binary
+extern const uint8_t server_cert_pem_start[] asm("_binary_server_cert_pem_start");
+extern const uint8_t server_cert_pem_end[]   asm("_binary_server_cert_pem_end");
+extern const uint8_t server_key_pem_start[] asm("_binary_server_key_pem_start");
+extern const uint8_t server_key_pem_end[]   asm("_binary_server_key_pem_end");
 
 #endif // CERT_H

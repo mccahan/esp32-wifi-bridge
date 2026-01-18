@@ -1,10 +1,10 @@
 # ESP32-S3-POE-ETH WiFi-Ethernet HTTPS Proxy
 
-This project uses the ESP32-S3-POE-ETH board (Waveshare) with **ESP-IDF framework** to create a transparent WiFi-Ethernet HTTPS proxy that:
-- Accepts HTTPS connections on Ethernet (port 443)
-- Forwards encrypted TLS traffic without decryption (transparent TCP proxy)
-- Proxies to Tesla Powerwall at 192.168.91.1 over WiFi
-- Preserves end-to-end TLS encryption between client and Powerwall
+This project uses the ESP32-S3-POE-ETH board (Waveshare) with **ESP-IDF framework** to create a WiFi-Ethernet HTTPS proxy with TLS termination that:
+- Accepts HTTPS connections on Ethernet (port 443) with self-signed certificate
+- Decrypts incoming TLS traffic using esp_tls (high-level mbedTLS wrapper)
+- Re-encrypts and forwards HTTP traffic to Tesla Powerwall at 192.168.91.1 over WiFi
+- Handles SNI/hostname requirements of the Powerwall server
 
 ## Hardware
 
@@ -25,27 +25,30 @@ This project uses the ESP32-S3-POE-ETH board (Waveshare) with **ESP-IDF framewor
 ## Features
 
 - **WiFi Client**: Connects to Tesla Powerwall AP (192.168.91.1)
-- **Transparent TCP Proxy**: Forwards HTTPS traffic on port 443 without TLS termination
-- **End-to-End TLS**: TLS encryption preserved between Ethernet client and Powerwall
+- **TLS Termination Proxy**: Decrypts HTTPS on Ethernet side using self-signed certificate
+- **HTTPS Client**: Re-encrypts and forwards to Powerwall with proper hostname handling
 - **DHCP**: Both WiFi and Ethernet interfaces use DHCP
 - **mDNS**: Advertises "_powerwall" service on Ethernet interface
-- **Bidirectional**: Handles traffic in both directions with 1KB buffers
-- **Low Memory**: Efficient TCP-only forwarding without mbedTLS overhead
+- **Bidirectional**: Handles decrypted HTTP traffic in both directions with 2KB buffers
+- **Memory Optimized**: Uses esp_tls with dynamic buffers and asymmetric content lengths
 
 ## Architecture
 
 ```
-[Ethernet Client] <===HTTPS (TLS passthrough)===> [ESP32-S3] <===HTTPS (TLS)===> [Powerwall WiFi]
-                                                   TCP Proxy
+[Ethernet Client] <=HTTPS (TLS)=> [ESP32-S3 Proxy] <=HTTPS (TLS)=> [Powerwall WiFi]
+                                  decrypt | re-encrypt
+                                     HTTP proxy
 ```
 
-This implementation provides **transparent TCP proxying**:
-- **No TLS Termination**: Traffic remains encrypted end-to-end
-- **Low Resource Usage**: Simple socket forwarding without cryptographic overhead
-- **Ethernet Side**: Accepts TCP connections on port 443
-- **WiFi Side**: Forwards to Powerwall at 192.168.91.1:443
+This implementation provides **TLS termination with HTTP proxying**:
+- **TLS Termination**: Decrypts client HTTPS using self-signed certificate
+- **HTTP Proxy**: Forwards decrypted HTTP requests
+- **Re-encryption**: Establishes separate TLS connection to Powerwall
+- **Hostname Handling**: Properly handles SNI requirements for Powerwall server
+- **Ethernet Side**: esp_tls server with self-signed cert (cert.h)
+- **WiFi Side**: esp_tls client to Powerwall (skips cert verification)
 
-The ESP32-S3 acts as a pure TCP relay, forwarding encrypted TLS traffic bidirectionally without inspecting or modifying it. This preserves end-to-end encryption and minimizes memory usage.
+The ESP32-S3 acts as a man-in-the-middle HTTPS proxy, allowing inspection and modification of HTTP traffic while maintaining separate TLS sessions on both sides. This is required because the Powerwall server validates the hostname in the request.
 
 ## Configuration
 

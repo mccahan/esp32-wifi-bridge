@@ -2,9 +2,8 @@
  * ESP32-S3 W5500 Ethernet WiFi Bridge (ESP-IDF)
  * 
  * This implementation uses ESP-IDF native esp_eth driver with W5500 over SPI.
- * The W5500 Ethernet chip does not support hardware TLS/SSL encryption.
- * This provides a transparent TCP proxy on port 443 that forwards traffic 
- * between Ethernet clients and the Powerwall WiFi endpoint.
+ * Implements HTTPS proxy with TLS termination using esp_tls (high-level mbedTLS wrapper).
+ * The proxy decrypts HTTPS traffic from Ethernet clients and re-encrypts it to the Powerwall.
  */
 
 #include <string.h>
@@ -17,6 +16,8 @@
 #include "esp_log.h"
 #include "esp_eth.h"
 #include "esp_netif.h"
+#include "esp_tls.h"
+#include "esp_crt_bundle.h"
 #include "nvs_flash.h"
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
@@ -27,6 +28,7 @@
 #include "lwip/netdb.h"
 
 #include "config.h"
+#include "cert.h"
 
 static const char *TAG = "wifi-eth-bridge";
 
@@ -226,84 +228,116 @@ static void init_mdns(void)
     ESP_LOGI(TAG, "mDNS service added: %s.%s on port %d", MDNS_SERVICE, MDNS_PROTOCOL, PROXY_PORT);
 }
 
-/** TCP Proxy task - handles bidirectional forwarding */
-static void handle_client(int client_sock, struct sockaddr_in *client_addr)
+/** HTTPS Proxy task with TLS termination - handles decrypt/re-encrypt */
+static void handle_client_task(void *pvParameters)
 {
-    char addr_str[32];
-    inet_ntoa_r(client_addr->sin_addr, addr_str, sizeof(addr_str) - 1);
-    ESP_LOGI(TAG, "Client connected from %s:%d", addr_str, ntohs(client_addr->sin_port));
+    int client_sock = (int)pvParameters;
+    char addr_str[32] = "unknown";
+    
+    ESP_LOGI(TAG, "Handling client connection");
 
-    // Connect to Powerwall over WiFi
-    int powerwall_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
-    if (powerwall_sock < 0) {
-        ESP_LOGE(TAG, "Unable to create socket for Powerwall connection");
+    // Server-side TLS configuration (accept connections with self-signed cert)
+    esp_tls_cfg_server_t server_cfg = {
+        .cacert_buf = (const unsigned char *)server_cert_pem_start,
+        .cacert_bytes = server_cert_pem_end - server_cert_pem_start,
+        .servercert_buf = (const unsigned char *)server_cert_pem_start,
+        .servercert_bytes = server_cert_pem_end - server_cert_pem_start,
+        .serverkey_buf = (const unsigned char *)server_key_pem_start,
+        .serverkey_bytes = server_key_pem_end - server_key_pem_start,
+    };
+
+    // Create TLS connection for client (server role)
+    esp_tls_t *client_tls = esp_tls_init();
+    if (!client_tls) {
+        ESP_LOGE(TAG, "Failed to allocate esp_tls for client");
         close(client_sock);
+        vTaskDelete(NULL);
         return;
     }
 
-    struct sockaddr_in powerwall_addr;
-    powerwall_addr.sin_family = AF_INET;
-    powerwall_addr.sin_port = htons(443);
-    powerwall_addr.sin_addr.s_addr = inet_addr(POWERWALL_IP_STR);
-
-    if (connect(powerwall_sock, (struct sockaddr *)&powerwall_addr, sizeof(powerwall_addr)) != 0) {
-        ESP_LOGE(TAG, "Failed to connect to Powerwall at %s:443", POWERWALL_IP_STR);
-        close(powerwall_sock);
+    int ret = esp_tls_server_session_create(&server_cfg, client_sock, client_tls);
+    if (ret != 0) {
+        ESP_LOGE(TAG, "TLS handshake with client failed: %d", ret);
+        esp_tls_conn_destroy(client_tls);
         close(client_sock);
+        vTaskDelete(NULL);
         return;
     }
 
-    ESP_LOGI(TAG, "Connected to Powerwall at %s:443", POWERWALL_IP_STR);
+    ESP_LOGI(TAG, "TLS handshake with client successful");
 
-    // Set both sockets to non-blocking
-    fcntl(client_sock, F_SETFL, O_NONBLOCK);
-    fcntl(powerwall_sock, F_SETFL, O_NONBLOCK);
+    // Client-side TLS configuration (connect to Powerwall, skip verification)
+    esp_tls_cfg_t powerwall_cfg = {
+        .skip_common_name = true,
+        .timeout_ms = 10000,
+    };
 
-    // Proxy data bidirectionally
-    uint8_t buffer[1024];
+    // Connect to Powerwall with TLS
+    esp_tls_t *powerwall_tls = esp_tls_init();
+    if (!powerwall_tls) {
+        ESP_LOGE(TAG, "Failed to allocate esp_tls for Powerwall");
+        esp_tls_conn_destroy(client_tls);
+        close(client_sock);
+        vTaskDelete(NULL);
+        return;
+    }
+
+    ret = esp_tls_conn_new_sync(POWERWALL_IP_STR, strlen(POWERWALL_IP_STR), 443, &powerwall_cfg, powerwall_tls);
+    if (ret != 1) {
+        ESP_LOGE(TAG, "Failed to connect to Powerwall via TLS");
+        esp_tls_conn_destroy(powerwall_tls);
+        esp_tls_conn_destroy(client_tls);
+        close(client_sock);
+        vTaskDelete(NULL);
+        return;
+    }
+
+    ESP_LOGI(TAG, "TLS connection to Powerwall established");
+
+    // Proxy decrypted HTTP data bidirectionally
+    uint8_t *buffer = malloc(2048);
+    if (!buffer) {
+        ESP_LOGE(TAG, "Failed to allocate proxy buffer");
+        esp_tls_conn_destroy(powerwall_tls);
+        esp_tls_conn_destroy(client_tls);
+        close(client_sock);
+        vTaskDelete(NULL);
+        return;
+    }
+
     TickType_t last_activity = xTaskGetTickCount();
     const TickType_t timeout_ticks = pdMS_TO_TICKS(PROXY_TIMEOUT_MS);
 
     while (1) {
-        bool activity = false;
-        fd_set read_fds;
-        struct timeval tv = {.tv_sec = 0, .tv_usec = 100000}; // 100ms timeout
-
-        FD_ZERO(&read_fds);
-        FD_SET(client_sock, &read_fds);
-        FD_SET(powerwall_sock, &read_fds);
-        int max_fd = (client_sock > powerwall_sock) ? client_sock : powerwall_sock;
-
-        int ret = select(max_fd + 1, &read_fds, NULL, NULL, &tv);
-        if (ret < 0) {
-            ESP_LOGE(TAG, "select() error");
+        // Set read timeout for non-blocking behavior
+        struct timeval tv = {.tv_sec = 0, .tv_usec = 100000};
+        
+        // Client -> Powerwall
+        int len = esp_tls_conn_read(client_tls, buffer, 2048);
+        if (len > 0) {
+            int written = esp_tls_conn_write(powerwall_tls, buffer, len);
+            if (written < 0) {
+                ESP_LOGE(TAG, "Error writing to Powerwall");
+                break;
+            }
+            last_activity = xTaskGetTickCount();
+        } else if (len < 0 && len != ESP_TLS_ERR_SSL_WANT_READ && len != ESP_TLS_ERR_SSL_WANT_WRITE) {
+            ESP_LOGI(TAG, "Client connection closed or error: %d", len);
             break;
         }
 
-        // Client -> Powerwall
-        if (FD_ISSET(client_sock, &read_fds)) {
-            int len = recv(client_sock, buffer, sizeof(buffer), 0);
-            if (len > 0) {
-                send(powerwall_sock, buffer, len, 0);
-                last_activity = xTaskGetTickCount();
-                activity = true;
-            } else if (len == 0) {
-                ESP_LOGI(TAG, "Client closed connection");
+        // Powerwall -> Client  
+        len = esp_tls_conn_read(powerwall_tls, buffer, 2048);
+        if (len > 0) {
+            int written = esp_tls_conn_write(client_tls, buffer, len);
+            if (written < 0) {
+                ESP_LOGE(TAG, "Error writing to client");
                 break;
             }
-        }
-
-        // Powerwall -> Client
-        if (FD_ISSET(powerwall_sock, &read_fds)) {
-            int len = recv(powerwall_sock, buffer, sizeof(buffer), 0);
-            if (len > 0) {
-                send(client_sock, buffer, len, 0);
-                last_activity = xTaskGetTickCount();
-                activity = true;
-            } else if (len == 0) {
-                ESP_LOGI(TAG, "Powerwall closed connection");
-                break;
-            }
+            last_activity = xTaskGetTickCount();
+        } else if (len < 0 && len != ESP_TLS_ERR_SSL_WANT_READ && len != ESP_TLS_ERR_SSL_WANT_WRITE) {
+            ESP_LOGI(TAG, "Powerwall connection closed or error: %d", len);
+            break;
         }
 
         // Check timeout
@@ -311,11 +345,17 @@ static void handle_client(int client_sock, struct sockaddr_in *client_addr)
             ESP_LOGI(TAG, "Connection timeout");
             break;
         }
+
+        // Small delay to prevent tight loop
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 
-    close(powerwall_sock);
+    free(buffer);
+    esp_tls_conn_destroy(powerwall_tls);
+    esp_tls_conn_destroy(client_tls);
     close(client_sock);
     ESP_LOGI(TAG, "Client connection closed");
+    vTaskDelete(NULL);
 }
 
 /** TCP Server task */
@@ -348,15 +388,15 @@ static void tcp_server_task(void *pvParameters)
         return;
     }
 
-    if (listen(server_socket, 5) != 0) {
+    if (listen(server_socket, 3) != 0) {
         ESP_LOGE(TAG, "Socket listen failed");
         close(server_socket);
         vTaskDelete(NULL);
         return;
     }
 
-    ESP_LOGI(TAG, "TCP Server listening on port %d", PROXY_PORT);
-    ESP_LOGI(TAG, "Ready to proxy traffic from Ethernet to WiFi (%s:443)", POWERWALL_IP_STR);
+    ESP_LOGI(TAG, "HTTPS Server (TLS termination) listening on port %d", PROXY_PORT);
+    ESP_LOGI(TAG, "Ready to decrypt and proxy HTTPS traffic to Powerwall (%s:443)", POWERWALL_IP_STR);
 
     while (1) {
         struct sockaddr_in client_addr;
@@ -368,9 +408,13 @@ static void tcp_server_task(void *pvParameters)
             continue;
         }
 
-        // Handle client in this task (blocking)
-        // For production, spawn a new task per client
-        handle_client(client_sock, &client_addr);
+        char addr_str[32];
+        inet_ntoa_r(client_addr.sin_addr, addr_str, sizeof(addr_str) - 1);
+        ESP_LOGI(TAG, "Client connected from %s:%d", addr_str, ntohs(client_addr.sin_port));
+
+        // Spawn a new task to handle each client connection
+        // This allows multiple simultaneous connections
+        xTaskCreate(handle_client_task, "https_client", 8192, (void *)client_sock, 5, NULL);
     }
 
     close(server_socket);
