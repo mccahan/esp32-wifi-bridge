@@ -1,6 +1,9 @@
 # ESP32-S3-POE-ETH WiFi-Ethernet HTTPS Proxy
 
-This project uses the ESP32-S3-POE-ETH board (Waveshare) with **ESP-IDF framework** to create a WiFi-Ethernet bridge that proxies HTTPS traffic from the Ethernet interface to a Tesla Powerwall at 192.168.91.1 over WiFi.
+This project uses the ESP32-S3-POE-ETH board (Waveshare) with **ESP-IDF framework** to create a WiFi-Ethernet bridge with **full TLS termination** that:
+- Accepts HTTPS connections on Ethernet (port 443) using a self-signed certificate
+- Decrypts incoming TLS traffic
+- Re-encrypts and proxies to Tesla Powerwall at 192.168.91.1 over WiFi
 
 ## Hardware
 
@@ -21,15 +24,23 @@ This project uses the ESP32-S3-POE-ETH board (Waveshare) with **ESP-IDF framewor
 ## Features
 
 - **WiFi Client**: Connects to Tesla Powerwall AP (192.168.91.1)
-- **Ethernet Server**: TCP server on port 443 (transparent HTTPS tunnel)
+- **HTTPS Server**: Full TLS termination on Ethernet (port 443)
+- **Self-signed Certificate**: Decrypts client traffic using provided cert/key
+- **TLS Proxy**: Re-encrypts and forwards to Powerwall HTTPS endpoint
 - **DHCP**: Both WiFi and Ethernet interfaces use DHCP
 - **mDNS**: Advertises "_powerwall" service on Ethernet interface
-- **Bidirectional Proxy**: Forwards HTTPS traffic between Ethernet and WiFi
-- **ESP-IDF Native**: Uses native W5500 driver with full hardware support
+- **Bidirectional**: Handles HTTPS traffic in both directions
+- **ESP-IDF Native**: Uses mbedTLS for TLS termination
 
 ## TLS/HTTPS Implementation
 
-The W5500 Ethernet chip does not support hardware TLS/SSL. This implementation provides a **transparent TCP proxy** on port 443 that tunnels encrypted traffic between Ethernet clients and the Powerwall. The actual TLS encryption is handled end-to-end between the client and Powerwall.
+This implementation provides **full TLS termination**:
+- **Ethernet Side**: Acts as HTTPS server with self-signed certificate
+- **Decryption**: Uses mbedTLS to decrypt incoming client requests
+- **Re-encryption**: Establishes separate TLS connection to Powerwall
+- **WiFi Side**: Acts as HTTPS client to Powerwall (skips cert verification)
+
+The ESP32-S3 terminates the TLS connection from Ethernet clients, inspects/proxies the decrypted HTTP traffic, then re-establishes an encrypted connection to the Powerwall.
 
 ## Configuration
 

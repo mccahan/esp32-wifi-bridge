@@ -2,9 +2,10 @@
  * ESP32-S3 W5500 Ethernet WiFi Bridge (ESP-IDF)
  * 
  * This implementation uses ESP-IDF native esp_eth driver with W5500 over SPI.
- * The W5500 Ethernet chip does not support hardware TLS/SSL encryption.
- * This provides a transparent TCP proxy on port 443 that forwards traffic 
- * between Ethernet clients and the Powerwall WiFi endpoint.
+ * Provides a full TLS termination proxy that:
+ * - Accepts HTTPS connections on Ethernet (port 443) with self-signed certificate
+ * - Decrypts incoming TLS traffic
+ * - Re-encrypts and forwards to Powerwall HTTPS endpoint (192.168.91.1:443)
  */
 
 #include <string.h>
@@ -26,7 +27,15 @@
 #include "lwip/sys.h"
 #include "lwip/netdb.h"
 
+#include "mbedtls/ssl.h"
+#include "mbedtls/entropy.h"
+#include "mbedtls/ctr_drbg.h"
+#include "mbedtls/x509.h"
+#include "mbedtls/error.h"
+#include "mbedtls/net_sockets.h"
+
 #include "config.h"
+#include "cert.h"
 
 static const char *TAG = "wifi-eth-bridge";
 
@@ -226,82 +235,208 @@ static void init_mdns(void)
     ESP_LOGI(TAG, "mDNS service added: %s.%s on port %d", MDNS_SERVICE, MDNS_PROTOCOL, PROXY_PORT);
 }
 
-/** TCP Proxy task - handles bidirectional forwarding */
+/** TLS Proxy task - handles TLS termination and re-encryption */
 static void handle_client(int client_sock, struct sockaddr_in *client_addr)
 {
     char addr_str[32];
     inet_ntoa_r(client_addr->sin_addr, addr_str, sizeof(addr_str) - 1);
     ESP_LOGI(TAG, "Client connected from %s:%d", addr_str, ntohs(client_addr->sin_port));
 
+    mbedtls_ssl_context client_ssl;
+    mbedtls_ssl_config client_conf;
+    mbedtls_x509_crt server_cert_parsed;
+    mbedtls_pk_context server_pkey;
+    mbedtls_entropy_context entropy;
+    mbedtls_ctr_drbg_context ctr_drbg;
+    
+    mbedtls_ssl_context powerwall_ssl;
+    mbedtls_ssl_config powerwall_conf;
+    mbedtls_net_context powerwall_fd;
+
+    int ret;
+    const char *pers = "esp32_tls_proxy";
+
+    // Initialize mbedTLS structures
+    mbedtls_ssl_init(&client_ssl);
+    mbedtls_ssl_config_init(&client_conf);
+    mbedtls_x509_crt_init(&server_cert_parsed);
+    mbedtls_pk_init(&server_pkey);
+    mbedtls_entropy_init(&entropy);
+    mbedtls_ctr_drbg_init(&ctr_drbg);
+    
+    mbedtls_ssl_init(&powerwall_ssl);
+    mbedtls_ssl_config_init(&powerwall_conf);
+    mbedtls_net_init(&powerwall_fd);
+
+    // Seed the RNG
+    ret = mbedtls_ctr_drbg_seed(&ctr_drbg, mbedtls_entropy_func, &entropy,
+                                (const unsigned char *)pers, strlen(pers));
+    if (ret != 0) {
+        ESP_LOGE(TAG, "mbedtls_ctr_drbg_seed failed: -0x%04x", -ret);
+        goto exit;
+    }
+
+    // Parse server certificate
+    ret = mbedtls_x509_crt_parse(&server_cert_parsed, (const unsigned char *)server_cert, strlen(server_cert) + 1);
+    if (ret != 0) {
+        ESP_LOGE(TAG, "mbedtls_x509_crt_parse failed: -0x%04x", -ret);
+        goto exit;
+    }
+
+    // Parse server private key
+    ret = mbedtls_pk_parse_key(&server_pkey, (const unsigned char *)server_key, strlen(server_key) + 1,
+                               NULL, 0, mbedtls_ctr_drbg_random, &ctr_drbg);
+    if (ret != 0) {
+        ESP_LOGE(TAG, "mbedtls_pk_parse_key failed: -0x%04x", -ret);
+        goto exit;
+    }
+
+    // Configure SSL for client connection (server side)
+    ret = mbedtls_ssl_config_defaults(&client_conf, MBEDTLS_SSL_IS_SERVER,
+                                      MBEDTLS_SSL_TRANSPORT_STREAM, MBEDTLS_SSL_PRESET_DEFAULT);
+    if (ret != 0) {
+        ESP_LOGE(TAG, "mbedtls_ssl_config_defaults (client) failed: -0x%04x", -ret);
+        goto exit;
+    }
+
+    mbedtls_ssl_conf_rng(&client_conf, mbedtls_ctr_drbg_random, &ctr_drbg);
+    mbedtls_ssl_conf_ca_chain(&client_conf, server_cert_parsed.next, NULL);
+    
+    ret = mbedtls_ssl_conf_own_cert(&client_conf, &server_cert_parsed, &server_pkey);
+    if (ret != 0) {
+        ESP_LOGE(TAG, "mbedtls_ssl_conf_own_cert failed: -0x%04x", -ret);
+        goto exit;
+    }
+
+    ret = mbedtls_ssl_setup(&client_ssl, &client_conf);
+    if (ret != 0) {
+        ESP_LOGE(TAG, "mbedtls_ssl_setup (client) failed: -0x%04x", -ret);
+        goto exit;
+    }
+
+    // Set BIO callbacks for client connection
+    mbedtls_ssl_set_bio(&client_ssl, &client_sock, mbedtls_net_send, mbedtls_net_recv, NULL);
+
+    // Perform TLS handshake with client
+    ESP_LOGI(TAG, "Performing TLS handshake with client...");
+    while ((ret = mbedtls_ssl_handshake(&client_ssl)) != 0) {
+        if (ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
+            ESP_LOGE(TAG, "mbedtls_ssl_handshake (client) failed: -0x%04x", -ret);
+            goto exit;
+        }
+    }
+    ESP_LOGI(TAG, "TLS handshake with client successful");
+
     // Connect to Powerwall over WiFi
-    int powerwall_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
-    if (powerwall_sock < 0) {
-        ESP_LOGE(TAG, "Unable to create socket for Powerwall connection");
-        close(client_sock);
-        return;
+    char port_str[6];
+    snprintf(port_str, sizeof(port_str), "%d", 443);
+    
+    ret = mbedtls_net_connect(&powerwall_fd, POWERWALL_IP_STR, port_str, MBEDTLS_NET_PROTO_TCP);
+    if (ret != 0) {
+        ESP_LOGE(TAG, "mbedtls_net_connect to Powerwall failed: -0x%04x", -ret);
+        goto exit;
     }
-
-    struct sockaddr_in powerwall_addr;
-    powerwall_addr.sin_family = AF_INET;
-    powerwall_addr.sin_port = htons(443);
-    powerwall_addr.sin_addr.s_addr = inet_addr(POWERWALL_IP_STR);
-
-    if (connect(powerwall_sock, (struct sockaddr *)&powerwall_addr, sizeof(powerwall_addr)) != 0) {
-        ESP_LOGE(TAG, "Failed to connect to Powerwall at %s:443", POWERWALL_IP_STR);
-        close(powerwall_sock);
-        close(client_sock);
-        return;
-    }
-
     ESP_LOGI(TAG, "Connected to Powerwall at %s:443", POWERWALL_IP_STR);
 
-    // Set both sockets to non-blocking
-    fcntl(client_sock, F_SETFL, O_NONBLOCK);
-    fcntl(powerwall_sock, F_SETFL, O_NONBLOCK);
+    // Configure SSL for Powerwall connection (client side)
+    ret = mbedtls_ssl_config_defaults(&powerwall_conf, MBEDTLS_SSL_IS_CLIENT,
+                                      MBEDTLS_SSL_TRANSPORT_STREAM, MBEDTLS_SSL_PRESET_DEFAULT);
+    if (ret != 0) {
+        ESP_LOGE(TAG, "mbedtls_ssl_config_defaults (powerwall) failed: -0x%04x", -ret);
+        goto exit;
+    }
 
-    // Proxy data bidirectionally
-    uint8_t buffer[1024];
+    mbedtls_ssl_conf_authmode(&powerwall_conf, MBEDTLS_SSL_VERIFY_NONE); // Skip server verification
+    mbedtls_ssl_conf_rng(&powerwall_conf, mbedtls_ctr_drbg_random, &ctr_drbg);
+
+    ret = mbedtls_ssl_setup(&powerwall_ssl, &powerwall_conf);
+    if (ret != 0) {
+        ESP_LOGE(TAG, "mbedtls_ssl_setup (powerwall) failed: -0x%04x", -ret);
+        goto exit;
+    }
+
+    mbedtls_ssl_set_bio(&powerwall_ssl, &powerwall_fd, mbedtls_net_send, mbedtls_net_recv, NULL);
+
+    // Perform TLS handshake with Powerwall
+    ESP_LOGI(TAG, "Performing TLS handshake with Powerwall...");
+    while ((ret = mbedtls_ssl_handshake(&powerwall_ssl)) != 0) {
+        if (ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
+            ESP_LOGE(TAG, "mbedtls_ssl_handshake (powerwall) failed: -0x%04x", -ret);
+            goto exit;
+        }
+    }
+    ESP_LOGI(TAG, "TLS handshake with Powerwall successful");
+
+    // Proxy decrypted data bidirectionally
+    uint8_t buffer[2048];
     TickType_t last_activity = xTaskGetTickCount();
     const TickType_t timeout_ticks = pdMS_TO_TICKS(PROXY_TIMEOUT_MS);
 
+    // Set non-blocking mode for underlying sockets
+    int flags = fcntl(client_sock, F_GETFL, 0);
+    fcntl(client_sock, F_SETFL, flags | O_NONBLOCK);
+    flags = fcntl(powerwall_fd.fd, F_GETFL, 0);
+    fcntl(powerwall_fd.fd, F_SETFL, flags | O_NONBLOCK);
+
     while (1) {
-        bool activity = false;
         fd_set read_fds;
         struct timeval tv = {.tv_sec = 0, .tv_usec = 100000}; // 100ms timeout
 
         FD_ZERO(&read_fds);
         FD_SET(client_sock, &read_fds);
-        FD_SET(powerwall_sock, &read_fds);
-        int max_fd = (client_sock > powerwall_sock) ? client_sock : powerwall_sock;
+        FD_SET(powerwall_fd.fd, &read_fds);
+        int max_fd = (client_sock > powerwall_fd.fd) ? client_sock : powerwall_fd.fd;
 
-        int ret = select(max_fd + 1, &read_fds, NULL, NULL, &tv);
-        if (ret < 0) {
+        int select_ret = select(max_fd + 1, &read_fds, NULL, NULL, &tv);
+        if (select_ret < 0) {
             ESP_LOGE(TAG, "select() error");
             break;
         }
 
-        // Client -> Powerwall
+        // Client -> Powerwall (decrypt from client, encrypt to powerwall)
         if (FD_ISSET(client_sock, &read_fds)) {
-            int len = recv(client_sock, buffer, sizeof(buffer), 0);
-            if (len > 0) {
-                send(powerwall_sock, buffer, len, 0);
+            ret = mbedtls_ssl_read(&client_ssl, buffer, sizeof(buffer));
+            if (ret > 0) {
+                int written = 0;
+                while (written < ret) {
+                    int w = mbedtls_ssl_write(&powerwall_ssl, buffer + written, ret - written);
+                    if (w > 0) {
+                        written += w;
+                    } else if (w != MBEDTLS_ERR_SSL_WANT_WRITE && w != MBEDTLS_ERR_SSL_WANT_READ) {
+                        ESP_LOGE(TAG, "mbedtls_ssl_write to powerwall failed: -0x%04x", -w);
+                        goto exit;
+                    }
+                }
                 last_activity = xTaskGetTickCount();
-                activity = true;
-            } else if (len == 0) {
+            } else if (ret == 0 || ret == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY) {
                 ESP_LOGI(TAG, "Client closed connection");
+                break;
+            } else if (ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
+                ESP_LOGE(TAG, "mbedtls_ssl_read from client failed: -0x%04x", -ret);
                 break;
             }
         }
 
-        // Powerwall -> Client
-        if (FD_ISSET(powerwall_sock, &read_fds)) {
-            int len = recv(powerwall_sock, buffer, sizeof(buffer), 0);
-            if (len > 0) {
-                send(client_sock, buffer, len, 0);
+        // Powerwall -> Client (decrypt from powerwall, encrypt to client)
+        if (FD_ISSET(powerwall_fd.fd, &read_fds)) {
+            ret = mbedtls_ssl_read(&powerwall_ssl, buffer, sizeof(buffer));
+            if (ret > 0) {
+                int written = 0;
+                while (written < ret) {
+                    int w = mbedtls_ssl_write(&client_ssl, buffer + written, ret - written);
+                    if (w > 0) {
+                        written += w;
+                    } else if (w != MBEDTLS_ERR_SSL_WANT_WRITE && w != MBEDTLS_ERR_SSL_WANT_READ) {
+                        ESP_LOGE(TAG, "mbedtls_ssl_write to client failed: -0x%04x", -w);
+                        goto exit;
+                    }
+                }
                 last_activity = xTaskGetTickCount();
-                activity = true;
-            } else if (len == 0) {
+            } else if (ret == 0 || ret == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY) {
                 ESP_LOGI(TAG, "Powerwall closed connection");
+                break;
+            } else if (ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
+                ESP_LOGE(TAG, "mbedtls_ssl_read from powerwall failed: -0x%04x", -ret);
                 break;
             }
         }
@@ -313,7 +448,21 @@ static void handle_client(int client_sock, struct sockaddr_in *client_addr)
         }
     }
 
-    close(powerwall_sock);
+exit:
+    // Cleanup
+    mbedtls_ssl_close_notify(&client_ssl);
+    mbedtls_ssl_close_notify(&powerwall_ssl);
+    
+    mbedtls_net_free(&powerwall_fd);
+    mbedtls_ssl_free(&powerwall_ssl);
+    mbedtls_ssl_config_free(&powerwall_conf);
+    mbedtls_ssl_free(&client_ssl);
+    mbedtls_ssl_config_free(&client_conf);
+    mbedtls_x509_crt_free(&server_cert_parsed);
+    mbedtls_pk_free(&server_pkey);
+    mbedtls_ctr_drbg_free(&ctr_drbg);
+    mbedtls_entropy_free(&entropy);
+    
     close(client_sock);
     ESP_LOGI(TAG, "Client connection closed");
 }
@@ -355,8 +504,8 @@ static void tcp_server_task(void *pvParameters)
         return;
     }
 
-    ESP_LOGI(TAG, "TCP Server listening on port %d", PROXY_PORT);
-    ESP_LOGI(TAG, "Ready to proxy traffic from Ethernet to WiFi (%s:443)", POWERWALL_IP_STR);
+    ESP_LOGI(TAG, "HTTPS Server (TLS termination) listening on port %d", PROXY_PORT);
+    ESP_LOGI(TAG, "Ready to decrypt and proxy HTTPS traffic to Powerwall (%s:443)", POWERWALL_IP_STR);
 
     while (1) {
         struct sockaddr_in client_addr;
