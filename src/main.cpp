@@ -35,13 +35,6 @@
 #define TARGET_IP "192.168.91.1"
 #endif
 
-// ESP32-S3-ETH (Waveshare) Pin Configuration
-// Based on https://www.waveshare.com/wiki/ESP32-S3-ETH
-#define ETH_PHY_ADDR        1
-#define ETH_PHY_MDC         23
-#define ETH_PHY_MDIO        18
-#define ETH_PHY_POWER       -1  // No power pin control needed
-
 // Network Configuration
 // Ethernet will use DHCP to obtain IP address
 
@@ -262,8 +255,6 @@ void EthernetEvent(WiFiEvent_t event) {
     switch (event) {
         case ARDUINO_EVENT_ETH_START:
             logPrintln("ETH Started");
-            // Set hostname
-            ETH.setHostname("esp32-bridge");
             break;
         case ARDUINO_EVENT_ETH_CONNECTED:
             logPrintln("ETH Connected");
@@ -342,13 +333,16 @@ void setupEthernet() {
     // Register event handler
     WiFi.onEvent(EthernetEvent);
     
-    // Initialize Ethernet with LAN8720 PHY
-    // DHCP is enabled by default (no ETH.config() call)
-    // Using simplified begin() method for ESP32-S3
-    if (!ETH.begin(ETH_PHY_ADDR, ETH_PHY_POWER, ETH_PHY_MDC, ETH_PHY_MDIO)) {
+    // Initialize Ethernet with default settings for ESP32-S3-ETH
+    // The board has integrated LAN8720 PHY with predefined pins
+    // Using the parameterless begin() which uses board defaults
+    if (!ETH.begin()) {
         logPrintln("ETH initialization failed!");
         return;
     }
+    
+    // Set hostname after initialization
+    ETH.setHostname("esp32-bridge");
     
     logPrintln("Ethernet initialized - waiting for DHCP...");
 }
