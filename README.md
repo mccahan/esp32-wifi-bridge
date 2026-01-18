@@ -5,7 +5,7 @@ A WiFi to Ethernet bridge implementation for the ESP32-S3-ETH (Waveshare) board 
 ## Features
 
 - **Transparent Bridging**: Routes traffic from Ethernet clients through ESP32's WiFi connection
-- **Automatic Packet Forwarding**: ESP32-S3 handles forwarding between interfaces automatically
+- **NAPT/NAT Forwarding**: Automatic Network Address Port Translation for seamless packet forwarding
 - **Target IP Routing**: Specifically configured to route to 192.168.91.1 (e.g., Tesla Powerwall AP)
 - **Hardware Support**: Optimized for ESP32-S3-ETH (Waveshare) with W5500 SPI Ethernet
 - **Web Interface**: Built-in web server for viewing logs and monitoring status from Ethernet
@@ -102,9 +102,10 @@ Example: If the ESP32 gets Ethernet IP `192.168.1.100`, access the web interface
 
 1. **WiFi Connection**: ESP32 connects to the specified WiFi network as a station
 2. **Ethernet Interface**: Connects to Ethernet and obtains IP via DHCP
-3. **Automatic Bridging**: ESP32-S3 automatically forwards packets between Ethernet and WiFi interfaces
-4. **Web Server**: Provides HTTP interface on Ethernet for monitoring and logs
-5. **Traffic Routing**: All traffic flows between interfaces, enabling Ethernet devices to access the WiFi network and target IP
+3. **NAPT Configuration**: When both interfaces are ready, NAPT (Network Address Port Translation) is automatically enabled
+4. **Packet Forwarding**: Traffic from Ethernet is translated and forwarded through WiFi interface
+5. **Web Server**: Provides HTTP interface on Ethernet for monitoring and logs
+6. **Traffic Routing**: All Ethernet traffic flows through WiFi NAT, enabling access to the WiFi network and target IP
 
 ## Use Case: Tesla Powerwall
 
@@ -118,7 +119,7 @@ This bridge is designed to connect to a Tesla Powerwall's WiFi AP and expose its
 
 ```
 [Ethernet Network] <--> [ESP32-S3-ETH] <--> [WiFi Network] <--> [Target: 192.168.91.1]
-     (DHCP)           (Auto Forwarding)
+     (DHCP)           (NAPT/NAT Bridge)
 ```
 
 ## Pin Configuration (ESP32-S3-ETH)

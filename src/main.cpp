@@ -20,6 +20,12 @@
 #include <WebServer.h>
 #include <deque>
 
+extern "C" {
+#include "lwip/lwip_napt.h"
+#include "lwip/dns.h"
+#include "lwip/ip_addr.h"
+}
+
 // Configuration from build flags
 #ifndef WIFI_SSID
 #define WIFI_SSID "YourSSID"
@@ -47,6 +53,11 @@
 // Network Configuration
 // Ethernet will use DHCP to obtain IP address
 
+// NAPT Configuration
+#define NAPT_ENABLE 1
+#define IP_NAPT_MAX 512
+#define IP_PORTMAP_MAX 32
+
 // Web Server Configuration
 #define WEB_SERVER_PORT 80
 #define MAX_LOG_ENTRIES 100
@@ -61,6 +72,49 @@ bool logBufferEnabled = false;
 // State tracking
 static bool eth_connected = false;
 static bool wifi_connected = false;
+static bool napt_enabled = false;
+
+/**
+ * Enable NAPT (Network Address Port Translation) for packet forwarding
+ * This allows Ethernet clients to access the WiFi network and target IP
+ */
+void enableNAPT() {
+    if (napt_enabled) {
+        return;  // Already enabled
+    }
+    
+    if (!wifi_connected || !eth_connected) {
+        return;  // Wait for both interfaces
+    }
+    
+    Serial.println("Enabling NAPT for packet forwarding...");
+    logPrintln("Enabling NAPT for packet forwarding...");
+    
+    // Initialize NAPT
+    ip_napt_init(IP_NAPT_MAX, IP_PORTMAP_MAX);
+    
+    // Enable NAPT on the WiFi interface (upstream)
+    // This allows packets from Ethernet to be forwarded to WiFi with address translation
+    IPAddress wifi_ip = WiFi.localIP();
+    if (ip_napt_enable(wifi_ip, 1) == 0) {
+        Serial.println("NAPT enabled on WiFi interface");
+        Serial.print("Forwarding Ethernet traffic through WiFi (");
+        Serial.print(wifi_ip);
+        Serial.println(") to target network");
+        Serial.flush();
+        
+        logPrintln("NAPT enabled on WiFi interface");
+        logPrint("Forwarding Ethernet traffic through WiFi (");
+        logPrint(wifi_ip.toString());
+        logPrintln(") to target network");
+        
+        napt_enabled = true;
+    } else {
+        Serial.println("ERROR: Failed to enable NAPT!");
+        Serial.flush();
+        logPrintln("ERROR: Failed to enable NAPT!");
+    }
+}
 
 /**
  * Add a log entry to the buffer for web display
@@ -152,6 +206,9 @@ void handleRoot() {
         html += "<div class='status-item'>Ethernet MAC: " + ETH.macAddress() + "</div>";
     }
     html += "<div class='status-item'>Uptime: " + String(millis() / 1000) + " seconds</div>";
+    html += "<div class='status-item'>NAPT Forwarding: <span class='" + String(napt_enabled ? "connected" : "disconnected") + "'>";
+    html += napt_enabled ? "Enabled" : "Disabled";
+    html += "</span></div>";
     html += "<div class='status-item'>Target IP: " + String(TARGET_IP) + "</div>";
     html += "</div>";
     
@@ -205,6 +262,7 @@ void handleStatus() {
     } else {
         json += "\"eth_ip\":null,";
     }
+    json += "\"napt_enabled\":" + String(napt_enabled ? "true" : "false") + ",";
     json += "\"uptime\":" + String(millis() / 1000) + ",";
     json += "\"target_ip\":\"" + String(TARGET_IP) + "\"";
     json += "}";
@@ -244,12 +302,15 @@ void WiFiEvent(WiFiEvent_t event) {
             logPrintln(WiFi.localIP().toString());
             wifi_connected = true;
             
-            // ESP32-S3 automatically forwards packets when both interfaces are active
+            // Try to enable NAPT if Ethernet is also ready
+            enableNAPT();
+            
             logPrintln("WiFi interface ready for bridging");
             break;
         case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
             logPrintln("WiFi Disconnected - Reconnecting...");
             wifi_connected = false;
+            napt_enabled = false;  // Reset NAPT state when WiFi disconnects
             WiFi.reconnect();
             break;
         default:
@@ -282,12 +343,16 @@ void EthernetEvent(WiFiEvent_t event) {
             // Configure routing
             logPrintln("Ethernet interface ready");
             
+            // Try to enable NAPT if WiFi is also ready
+            enableNAPT();
+            
             // Start web server once we have an Ethernet IP
             setupWebServer();
             break;
         case ARDUINO_EVENT_ETH_DISCONNECTED:
             logPrintln("ETH Disconnected");
             eth_connected = false;
+            napt_enabled = false;  // Reset NAPT state when Ethernet disconnects
             break;
         case ARDUINO_EVENT_ETH_STOP:
             logPrintln("ETH Stopped");
@@ -445,10 +510,9 @@ void setup() {
     logPrintln("\n=================================");
     logPrintln("Bridge Setup Complete!");
     logPrintln("=================================");
-    logPrintln("ESP32 has both WiFi and Ethernet connectivity");
-    logPrintln("Ethernet IP obtained via DHCP");
-    logPrintln("ESP32-S3 automatically forwards packets between interfaces");
-    logPrint("Traffic will be routed through WiFi to: ");
+    logPrintln("Initializing WiFi and Ethernet interfaces...");
+    logPrintln("NAPT will be enabled automatically when both interfaces are ready");
+    logPrint("Traffic will be forwarded through WiFi to: ");
     logPrintln(TARGET_IP);
     logPrintln("Web interface will be available on Ethernet IP");
     logPrintln("");
@@ -466,6 +530,8 @@ void loop() {
         Serial.println(wifi_connected ? "Connected" : "Disconnected");
         Serial.print("Ethernet: ");
         Serial.println(eth_connected ? "Connected" : "Disconnected");
+        Serial.print("NAPT: ");
+        Serial.println(napt_enabled ? "Enabled (forwarding active)" : "Disabled");
         
         if (wifi_connected) {
             Serial.print("WiFi IP: ");
@@ -485,6 +551,8 @@ void loop() {
         logPrintln(wifi_connected ? "Connected" : "Disconnected");
         logPrint("Ethernet: ");
         logPrintln(eth_connected ? "Connected" : "Disconnected");
+        logPrint("NAPT: ");
+        logPrintln(napt_enabled ? "Enabled (forwarding active)" : "Disabled");
         
         if (wifi_connected) {
             logPrint("WiFi IP: ");
