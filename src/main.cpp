@@ -16,9 +16,6 @@
 #include <WiFi.h>
 #include <ETH.h>
 #include <WebServer.h>
-#include <lwip/lwip_napt.h>
-#include <lwip/ip_addr.h>
-#include <lwip/dns.h>
 #include <vector>
 #include <deque>
 
@@ -37,14 +34,6 @@
 
 // Network Configuration
 // Ethernet will use DHCP to obtain IP address
-
-// NAPT Configuration
-#ifndef IP_NAPT_MAX
-#define IP_NAPT_MAX 512  // Maximum number of NAT entries
-#endif
-#ifndef IP_PORTMAP_MAX
-#define IP_PORTMAP_MAX 32  // Maximum number of port mappings
-#endif
 
 // Web Server Configuration
 #define WEB_SERVER_PORT 80
@@ -317,7 +306,7 @@ void setupWiFi() {
     int attempts = 0;
     while (WiFi.status() != WL_CONNECTED && attempts < 30) {
         delay(1000);
-        Serial.print(".");
+        logPrint(".");
         attempts++;
     }
     
@@ -355,20 +344,6 @@ void setupEthernet() {
     logPrintln("Ethernet initialized - waiting for DHCP...");
 }
 
-/**
- * Setup IP Forwarding
- * ESP32-S3 handles packet forwarding automatically when both interfaces are active
- * No explicit NAPT configuration is needed for basic bridging
- */
-void setupBridging() {
-    logPrintln("Configuring bridge mode...");
-    
-    // The ESP32-S3 Arduino framework handles IP forwarding between interfaces
-    // when both WiFi and Ethernet are active. No additional configuration needed.
-    
-    logPrintln("Bridge mode ready - traffic will flow between interfaces");
-}
-
 void setup() {
     // Initialize Serial
     Serial.begin(115200);
@@ -394,14 +369,12 @@ void setup() {
     
     delay(2000);
     
-    // Setup bridging
-    setupBridging();
-    
     logPrintln("\n=================================");
     logPrintln("Bridge Setup Complete!");
     logPrintln("=================================");
     logPrintln("ESP32 has both WiFi and Ethernet connectivity");
     logPrintln("Ethernet IP obtained via DHCP");
+    logPrintln("ESP32-S3 automatically forwards packets between interfaces");
     logPrint("Traffic will be routed through WiFi to: ");
     logPrintln(TARGET_IP);
     logPrintln("Web interface will be available on Ethernet IP");
