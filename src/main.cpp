@@ -60,7 +60,7 @@ extern "C" {
 
 // Web Server Configuration
 #define WEB_SERVER_PORT 80
-#define MAX_LOG_ENTRIES 100
+#define MAX_LOG_ENTRIES 50  // Reduced from 100 to save memory
 
 // Web Server
 WebServer server(WEB_SERVER_PORT);
@@ -154,83 +154,111 @@ void enableNAPT() {
  * Web Server Handler - Root Page
  */
 void handleRoot() {
-    String html = "<!DOCTYPE html><html><head>";
-    html += "<meta charset='UTF-8'>";
-    html += "<meta name='viewport' content='width=device-width, initial-scale=1.0'>";
-    html += "<title>ESP32 WiFi-Ethernet Bridge</title>";
-    html += "<style>";
-    html += "body { font-family: Arial, sans-serif; margin: 20px; background: #f0f0f0; }";
-    html += "h1 { color: #333; }";
-    html += ".status { background: white; padding: 15px; border-radius: 5px; margin: 10px 0; }";
-    html += ".status-item { margin: 5px 0; }";
-    html += ".connected { color: green; font-weight: bold; }";
-    html += ".disconnected { color: red; font-weight: bold; }";
-    html += ".log-container { background: #1e1e1e; color: #d4d4d4; padding: 15px; border-radius: 5px; margin: 10px 0; }";
-    html += ".log-container pre { margin: 0; font-family: 'Courier New', monospace; font-size: 12px; white-space: pre-wrap; word-wrap: break-word; }";
-    html += ".refresh-btn { background: #007bff; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; margin: 10px 5px; }";
-    html += ".refresh-btn:hover { background: #0056b3; }";
-    html += ".auto-refresh { margin: 10px 0; }";
-    html += "</style>";
-    html += "<script>";
-    html += "var autoRefresh = false;";
-    html += "var refreshInterval;";
-    html += "function toggleAutoRefresh() {";
-    html += "  autoRefresh = !autoRefresh;";
-    html += "  if (autoRefresh) {";
-    html += "    refreshInterval = setInterval(function(){ location.reload(); }, 3000);";
-    html += "    document.getElementById('autoRefreshBtn').innerText = 'Stop Auto Refresh';";
-    html += "  } else {";
-    html += "    clearInterval(refreshInterval);";
-    html += "    document.getElementById('autoRefreshBtn').innerText = 'Start Auto Refresh';";
-    html += "  }";
-    html += "}";
-    html += "</script>";
-    html += "</head><body>";
-    html += "<h1>ESP32 WiFi-Ethernet Bridge</h1>";
+    // Send HTML header
+    server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+    server.send(200, "text/html", "");
+    
+    // Send HTML in chunks to avoid memory issues
+    server.sendContent("<!DOCTYPE html><html><head>");
+    server.sendContent("<meta charset='UTF-8'>");
+    server.sendContent("<meta name='viewport' content='width=device-width, initial-scale=1.0'>");
+    server.sendContent("<title>ESP32 WiFi-Ethernet Bridge</title>");
+    server.sendContent("<style>");
+    server.sendContent("body { font-family: Arial, sans-serif; margin: 20px; background: #f0f0f0; }");
+    server.sendContent("h1 { color: #333; }");
+    server.sendContent(".status { background: white; padding: 15px; border-radius: 5px; margin: 10px 0; }");
+    server.sendContent(".status-item { margin: 5px 0; }");
+    server.sendContent(".connected { color: green; font-weight: bold; }");
+    server.sendContent(".disconnected { color: red; font-weight: bold; }");
+    server.sendContent(".log-container { background: #1e1e1e; color: #d4d4d4; padding: 15px; border-radius: 5px; margin: 10px 0; }");
+    server.sendContent(".log-container pre { margin: 0; font-family: 'Courier New', monospace; font-size: 12px; white-space: pre-wrap; word-wrap: break-word; }");
+    server.sendContent(".refresh-btn { background: #007bff; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; margin: 10px 5px; }");
+    server.sendContent(".refresh-btn:hover { background: #0056b3; }");
+    server.sendContent("</style>");
+    server.sendContent("<script>");
+    server.sendContent("var autoRefresh = false;");
+    server.sendContent("var refreshInterval;");
+    server.sendContent("function toggleAutoRefresh() {");
+    server.sendContent("  autoRefresh = !autoRefresh;");
+    server.sendContent("  if (autoRefresh) {");
+    server.sendContent("    refreshInterval = setInterval(function(){ location.reload(); }, 3000);");
+    server.sendContent("    document.getElementById('autoRefreshBtn').innerText = 'Stop Auto Refresh';");
+    server.sendContent("  } else {");
+    server.sendContent("    clearInterval(refreshInterval);");
+    server.sendContent("    document.getElementById('autoRefreshBtn').innerText = 'Start Auto Refresh';");
+    server.sendContent("  }");
+    server.sendContent("}");
+    server.sendContent("</script>");
+    server.sendContent("</head><body>");
+    server.sendContent("<h1>ESP32 WiFi-Ethernet Bridge</h1>");
     
     // Status section
-    html += "<div class='status'>";
-    html += "<h2>Bridge Status</h2>";
-    html += "<div class='status-item'>WiFi: <span class='" + String(wifi_connected ? "connected" : "disconnected") + "'>";
-    html += wifi_connected ? "Connected" : "Disconnected";
-    html += "</span></div>";
+    server.sendContent("<div class='status'>");
+    server.sendContent("<h2>Bridge Status</h2>");
+    
+    String statusLine = "<div class='status-item'>WiFi: <span class='" + String(wifi_connected ? "connected" : "disconnected") + "'>";
+    statusLine += wifi_connected ? "Connected" : "Disconnected";
+    statusLine += "</span></div>";
+    server.sendContent(statusLine);
+    
     if (wifi_connected) {
-        html += "<div class='status-item'>WiFi IP: " + WiFi.localIP().toString() + "</div>";
-        html += "<div class='status-item'>WiFi MAC: " + WiFi.macAddress() + "</div>";
+        server.sendContent("<div class='status-item'>WiFi IP: " + WiFi.localIP().toString() + "</div>");
+        server.sendContent("<div class='status-item'>WiFi MAC: " + WiFi.macAddress() + "</div>");
     }
-    html += "<div class='status-item'>Ethernet: <span class='" + String(eth_connected ? "connected" : "disconnected") + "'>";
-    html += eth_connected ? "Connected" : "Disconnected";
-    html += "</span></div>";
+    
+    statusLine = "<div class='status-item'>Ethernet: <span class='" + String(eth_connected ? "connected" : "disconnected") + "'>";
+    statusLine += eth_connected ? "Connected" : "Disconnected";
+    statusLine += "</span></div>";
+    server.sendContent(statusLine);
+    
     if (eth_connected) {
-        html += "<div class='status-item'>Ethernet IP: " + ETH.localIP().toString() + "</div>";
-        html += "<div class='status-item'>Ethernet MAC: " + ETH.macAddress() + "</div>";
+        server.sendContent("<div class='status-item'>Ethernet IP: " + ETH.localIP().toString() + "</div>");
+        server.sendContent("<div class='status-item'>Ethernet MAC: " + ETH.macAddress() + "</div>");
     }
-    html += "<div class='status-item'>Uptime: " + String(millis() / 1000) + " seconds</div>";
-    html += "<div class='status-item'>NAPT Forwarding: <span class='" + String(napt_enabled ? "connected" : "disconnected") + "'>";
-    html += napt_enabled ? "Enabled" : "Disabled";
-    html += "</span></div>";
-    html += "<div class='status-item'>Target IP: " + String(TARGET_IP) + "</div>";
-    html += "</div>";
+    
+    server.sendContent("<div class='status-item'>Uptime: " + String(millis() / 1000) + " seconds</div>");
+    
+    statusLine = "<div class='status-item'>NAPT Forwarding: <span class='" + String(napt_enabled ? "connected" : "disconnected") + "'>";
+    statusLine += napt_enabled ? "Enabled" : "Disabled";
+    statusLine += "</span></div>";
+    server.sendContent(statusLine);
+    
+    server.sendContent("<div class='status-item'>Target IP: " + String(TARGET_IP) + "</div>");
+    server.sendContent("</div>");
     
     // Controls
-    html += "<div>";
-    html += "<button class='refresh-btn' onclick='location.reload();'>Refresh Now</button>";
-    html += "<button class='refresh-btn' id='autoRefreshBtn' onclick='toggleAutoRefresh();'>Start Auto Refresh</button>";
-    html += "</div>";
+    server.sendContent("<div>");
+    server.sendContent("<button class='refresh-btn' onclick='location.reload();'>Refresh Now</button>");
+    server.sendContent("<button class='refresh-btn' id='autoRefreshBtn' onclick='toggleAutoRefresh();'>Start Auto Refresh</button>");
+    server.sendContent("</div>");
     
     // Logs section
-    html += "<div class='log-container'>";
-    html += "<h2 style='color: #d4d4d4; margin-top: 0;'>Device Logs (Last " + String(logBuffer.size()) + " entries)</h2>";
-    html += "<pre>";
+    server.sendContent("<div class='log-container'>");
+    server.sendContent("<h2 style='color: #d4d4d4; margin-top: 0;'>Device Logs (Last " + String(logBuffer.size()) + " entries)</h2>");
+    server.sendContent("<pre>");
+    
+    // Send logs in smaller chunks to avoid memory issues
+    String logChunk = "";
+    int chunkCount = 0;
     for (const auto& entry : logBuffer) {
-        html += entry;
+        logChunk += entry;
+        chunkCount++;
+        // Send every 10 log entries to keep memory usage low
+        if (chunkCount >= 10) {
+            server.sendContent(logChunk);
+            logChunk = "";
+            chunkCount = 0;
+        }
     }
-    html += "</pre>";
-    html += "</div>";
+    // Send remaining logs
+    if (logChunk.length() > 0) {
+        server.sendContent(logChunk);
+    }
     
-    html += "</body></html>";
-    
-    server.send(200, "text/html", html);
+    server.sendContent("</pre>");
+    server.sendContent("</div>");
+    server.sendContent("</body></html>");
+    server.sendContent("");  // End chunked response
 }
 
 /**
