@@ -1,14 +1,16 @@
 # ESP32-S3-POE-ETH WiFi-Ethernet Bridge
 
-A WiFi to Ethernet bridge implementation for the ESP32-S3-ETH (Waveshare) board that proxies requests from Ethernet clients to a target IP (192.168.91.1) via WiFi.
+A WiFi to Ethernet bridge implementation for the ESP32-S3-ETH (Waveshare) board that proxies requests from Ethernet clients to a target IP (192.168.91.1) via WiFi, with HTTPS proxy support.
 
 ## Features
 
 - **Transparent Bridging**: Routes traffic from Ethernet clients through ESP32's WiFi connection
 - **NAPT/NAT Forwarding**: Automatic Network Address Port Translation for seamless packet forwarding
+- **HTTPS Proxy**: Dedicated HTTPS proxy server on port 443 forwarding to https://192.168.91.1
 - **Target IP Routing**: Specifically configured to route to 192.168.91.1 (e.g., Tesla Powerwall AP)
 - **Hardware Support**: Optimized for ESP32-S3-ETH (Waveshare) with W5500 SPI Ethernet
-- **Web Interface**: Built-in web server for viewing logs and monitoring status from Ethernet
+- **Web Interface**: Built-in HTTP server for viewing logs and monitoring status from Ethernet (port 80)
+- **Self-Signed SSL**: Embedded self-signed certificate for HTTPS proxy
 - **PlatformIO Build**: Easy building and flashing with PlatformIO
 - **GitHub Actions CI**: Automated builds on push
 
@@ -85,18 +87,29 @@ The Ethernet interface will automatically obtain its IP address from the network
 
 Once the ESP32 obtains an Ethernet IP address via DHCP, you can access the web interface by opening a browser and navigating to the Ethernet IP address (displayed in serial output).
 
-The web interface provides:
-- **Real-time Status**: WiFi and Ethernet connection status
+**HTTP Monitoring Interface (Port 80):**
+- **Real-time Status**: WiFi and Ethernet connection status, HTTPS proxy status
 - **Network Information**: IP addresses, MAC addresses, gateway info
-- **Device Logs**: Last 100 log entries with timestamps
+- **Device Logs**: Last 50 log entries with timestamps
 - **Auto-refresh**: Optional auto-refresh every 3 seconds
 
 Endpoints:
 - `/` - Main web interface with logs and status
 - `/logs` - Plain text logs (useful for debugging)
-- `/status` - JSON status API
+- `/status` - JSON status API (includes `https_proxy_running` field)
 
 Example: If the ESP32 gets Ethernet IP `192.168.1.100`, access the web interface at `http://192.168.1.100`
+
+**HTTPS Proxy (Port 443):**
+
+The ESP32 also runs an HTTPS proxy server that forwards requests to `https://192.168.91.1`. This is useful for:
+- Accessing HTTPS services on the WiFi network through Ethernet
+- Proxying Tesla Powerwall HTTPS interface
+- Bypassing SSL certificate issues on client devices
+
+Example: Connect to `https://192.168.1.100` and traffic will be proxied to `https://192.168.91.1`
+
+**Note**: The HTTPS proxy uses a self-signed SSL certificate. Your browser will show a security warning - this is expected. Accept the certificate to proceed.
 
 ## How It Works
 
@@ -104,8 +117,19 @@ Example: If the ESP32 gets Ethernet IP `192.168.1.100`, access the web interface
 2. **Ethernet Interface**: Connects to Ethernet and obtains IP via DHCP
 3. **NAPT Configuration**: When both interfaces are ready, NAPT (Network Address Port Translation) is automatically enabled
 4. **Packet Forwarding**: Traffic from Ethernet is translated and forwarded through WiFi interface
-5. **Web Server**: Provides HTTP interface on Ethernet for monitoring and logs
-6. **Traffic Routing**: All Ethernet traffic flows through WiFi NAT, enabling access to the WiFi network and target IP
+5. **HTTP Web Server**: Provides HTTP interface on Ethernet port 80 for monitoring and logs
+6. **HTTPS Proxy Server**: Provides HTTPS proxy on Ethernet port 443, forwarding to https://192.168.91.1
+7. **Traffic Routing**: All Ethernet traffic flows through WiFi NAT, enabling access to the WiFi network and target IP
+
+### HTTPS Proxy Details
+
+The HTTPS proxy:
+- Listens on port 443 (HTTPS)
+- Uses a self-signed SSL certificate for incoming connections
+- Forwards decrypted traffic to `https://192.168.91.1` over WiFi
+- Accepts self-signed certificates from the target server
+- Handles bidirectional data transfer with 2KB buffer
+- Timeout: 30 seconds for idle connections
 
 ## Use Case: Tesla Powerwall
 
@@ -114,12 +138,25 @@ This bridge is designed to connect to a Tesla Powerwall's WiFi AP and expose its
 1. ESP32 connects to Powerwall's WiFi (TEG-XXXX)
 2. Powerwall gateway is typically at 192.168.91.1
 3. Ethernet clients can access the Powerwall through the ESP32 bridge
+4. **HTTPS Access**: Use `https://<ethernet-ip>` to access the Powerwall's HTTPS interface securely
+
+The HTTPS proxy is particularly useful for the Tesla Powerwall as it:
+- Forwards HTTPS requests to the Powerwall gateway
+- Handles SSL/TLS encryption for Ethernet clients
+- Accepts the Powerwall's self-signed certificate
+- Provides seamless access to the Powerwall web interface
 
 ## Architecture
 
 ```
-[Ethernet Network] <--> [ESP32-S3-ETH] <--> [WiFi Network] <--> [Target: 192.168.91.1]
-     (DHCP)           (NAPT/NAT Bridge)
+[Ethernet Client] <-HTTP(80)-> [ESP32-S3-ETH] <-WiFi-> [Target Network]
+                                  Monitoring
+                  
+[Ethernet Client] <-HTTPS(443)-> [ESP32-S3-ETH] <-HTTPS-> [192.168.91.1:443]
+                                  HTTPS Proxy              (Tesla Powerwall)
+                  
+[Ethernet Network] <-NAPT/NAT-> [ESP32-S3-ETH] <-WiFi-> [192.168.91.x]
+      (DHCP)                      All Traffic              (Other Devices)
 ```
 
 ## Pin Configuration (ESP32-S3-ETH)
@@ -166,6 +203,13 @@ This C++ implementation is inspired by the Rust-based [esp32-wifi-bridge](https:
 - Verify both WiFi and Ethernet are connected (see serial output)
 - Check that both interfaces have obtained IP addresses
 - Ensure NAPT is enabled (check serial logs)
+
+### HTTPS Proxy Issues
+- Verify WiFi is connected (proxy requires WiFi to forward requests)
+- Check that HTTPS proxy shows "Running" in status (web interface or serial)
+- Accept the self-signed certificate warning in your browser
+- Verify target IP (192.168.91.1) is accessible from WiFi network
+- Check serial logs for "HTTPS proxy: New client connection" messages
 
 ## License
 
