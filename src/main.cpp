@@ -74,47 +74,9 @@ static bool eth_connected = false;
 static bool wifi_connected = false;
 static bool napt_enabled = false;
 
-/**
- * Enable NAPT (Network Address Port Translation) for packet forwarding
- * This allows Ethernet clients to access the WiFi network and target IP
- */
-void enableNAPT() {
-    if (napt_enabled) {
-        return;  // Already enabled
-    }
-    
-    if (!wifi_connected || !eth_connected) {
-        return;  // Wait for both interfaces
-    }
-    
-    Serial.println("Enabling NAPT for packet forwarding...");
-    logPrintln("Enabling NAPT for packet forwarding...");
-    
-    // Initialize NAPT
-    ip_napt_init(IP_NAPT_MAX, IP_PORTMAP_MAX);
-    
-    // Enable NAPT on the WiFi interface (upstream)
-    // This allows packets from Ethernet to be forwarded to WiFi with address translation
-    IPAddress wifi_ip = WiFi.localIP();
-    if (ip_napt_enable(wifi_ip, 1) == 0) {
-        Serial.println("NAPT enabled on WiFi interface");
-        Serial.print("Forwarding Ethernet traffic through WiFi (");
-        Serial.print(wifi_ip);
-        Serial.println(") to target network");
-        Serial.flush();
-        
-        logPrintln("NAPT enabled on WiFi interface");
-        logPrint("Forwarding Ethernet traffic through WiFi (");
-        logPrint(wifi_ip.toString());
-        logPrintln(") to target network");
-        
-        napt_enabled = true;
-    } else {
-        Serial.println("ERROR: Failed to enable NAPT!");
-        Serial.flush();
-        logPrintln("ERROR: Failed to enable NAPT!");
-    }
-}
+// Forward declarations
+void logPrint(const String& message);
+void logPrintln(const String& message);
 
 /**
  * Add a log entry to the buffer for web display
@@ -148,6 +110,44 @@ void logPrint(const String& message) {
 void logPrintln(const String& message) {
     Serial.println(message);
     addLogEntry(message + "\n");
+}
+
+/**
+ * Enable NAPT (Network Address Port Translation) for packet forwarding
+ * This allows Ethernet clients to access the WiFi network and target IP
+ */
+void enableNAPT() {
+    if (napt_enabled) {
+        return;  // Already enabled
+    }
+    
+    if (!wifi_connected || !eth_connected) {
+        return;  // Wait for both interfaces
+    }
+    
+    Serial.println("Enabling NAPT for packet forwarding...");
+    Serial.flush();
+    logPrintln("Enabling NAPT for packet forwarding...");
+    
+    // Enable NAPT on the WiFi interface (upstream)
+    // This allows packets from Ethernet to be forwarded to WiFi with address translation
+    IPAddress wifi_ip = WiFi.localIP();
+    
+    // ip_napt_enable returns void, so we just call it and assume success
+    ip_napt_enable(wifi_ip, 1);
+    
+    Serial.println("NAPT enabled on WiFi interface");
+    Serial.print("Forwarding Ethernet traffic through WiFi (");
+    Serial.print(wifi_ip);
+    Serial.println(") to target network");
+    Serial.flush();
+    
+    logPrintln("NAPT enabled on WiFi interface");
+    logPrint("Forwarding Ethernet traffic through WiFi (");
+    logPrint(wifi_ip.toString());
+    logPrintln(") to target network");
+    
+    napt_enabled = true;
 }
 
 /**
