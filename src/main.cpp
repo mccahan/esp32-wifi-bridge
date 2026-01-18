@@ -18,8 +18,6 @@
 #include <ETH.h>
 #include <SPI.h>
 #include <WebServer.h>
-#include <WiFiClientSecure.h>
-#include <WiFiServerSecure.h>
 #include <deque>
 
 extern "C" {
@@ -63,72 +61,10 @@ extern "C" {
 
 // Web Server Configuration
 #define WEB_SERVER_PORT 80
-#define HTTPS_PROXY_PORT 443
 #define MAX_LOG_ENTRIES 50  // Reduced from 100 to save memory
-#define PROXY_BUFFER_SIZE 2048
-#define PROXY_TIMEOUT_MS 30000
-
-// Self-signed SSL Certificate for HTTPS proxy
-// Generated with: openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 3650 -nodes
-static const char server_cert[] PROGMEM = R"EOF(
------BEGIN CERTIFICATE-----
-MIIDXTCCAkWgAwIBAgIJAKJ3vLz8Y7HZMA0GCSqGSIb3DQEBCwUAMEUxCzAJBgNV
-BAYTAlVTMRMwEQYDVQQIDApTb21lLVN0YXRlMSEwHwYDVQQKDBhFU1AzMi1XaUZp
-LUJyaWRnZSBQcm9qZWN0MB4XDTI2MDExODAwMDAwMFoXDTM2MDExNzAwMDAwMFow
-RTELMAkGA1UEBhMCVVMxEzARBgNVBAgMClNvbWUtU3RhdGUxITAfBgNVBAoMGEVT
-UDMyLVdpRmktQnJpZGdlIFByb2plY3QwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAw
-ggEKAoIBAQC8yK5kFGVX8x7qN9YvPkXKjI3hZJZqYzN4xKQqN+vHfCc8TDvXQHmY
-sD7xqR5Z9pL3jH8xK5fN7Y2rM9pQ3xBvL8hRtN5K6sY7qX9jP4nT8vR3lK9mH2bQ
-7xPnN4yO5fL9sR3xK8mT6vH5yN3pQ7xR9lK8sH7qN5yM3vH9xR5lK7sQ9pN3yR7x
-K5mH8vT3qN9pL7xR5sK9mQ3yH7pN5xL8vR3qT9pK7xH5sM9mN3yL7pR5xQ8vT3qK
-9pM7xL5sN9mH3yR7pQ5xT8vK3qM9pL7xN5sH9mR3yQ7pK5xL8vT3qN9pM7xH5sN9
-mK3yR7pQ5xT8vL3qM9pK7xN5sH9mR3yQ7pL5xK8vAgMBAAGjUDBOMB0GA1UdDgQW
-BBT1X8vN3pQ7xR5lK8sH9mN3yL7pRzAfBgNVHSMEGDAWgBT1X8vN3pQ7xR5lK8sH
-9mN3yL7pRzAMBgNVHRMEBTADAQH/MA0GCSqGSIb3DQEBCwUAA4IBAQCx8K5mH3yR
-7pQ5xT8vK3qM9pL7xN5sH9mR3yQ7pK5xL8vT3qN9pM7xH5sN9mK3yR7pQ5xT8vL3
-qM9pK7xN5sH9mR3yQ7pL5xK8vT3qN9pM7xH5sN9mK3yR7pQ5xT8vL3qM9pK7xN5s
-H9mR3yQ7pL5xK8vT3qN9pM7xH5sN9mK3yR7pQ5xT8vL3qM9pK7xN5sH9mR3yQ7pL
-5xK8vT3qN9pM7xH5sN9mK3yR7pQ5xT8vL3qM9pK7xN5sH9mR3yQ7pL5xK8vT3qN9
-pM7xH5sN9mK3yR7pQ5xT8vL3qM9pK7xN5sH9mR3yQ7pL5xK8vT3qN9pM7xH5sN9m
-K3yR7pQ5xT8vL3qM9pK7xN5sH9mR
------END CERTIFICATE-----
-)EOF";
-
-static const char server_key[] PROGMEM = R"EOF(
------BEGIN PRIVATE KEY-----
-MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC8yK5kFGVX8x7q
-N9YvPkXKjI3hZJZqYzN4xKQqN+vHfCc8TDvXQHmYsD7xqR5Z9pL3jH8xK5fN7Y2r
-M9pQ3xBvL8hRtN5K6sY7qX9jP4nT8vR3lK9mH2bQ7xPnN4yO5fL9sR3xK8mT6vH5
-yN3pQ7xR9lK8sH7qN5yM3vH9xR5lK7sQ9pN3yR7xK5mH8vT3qN9pL7xR5sK9mQ3y
-H7pN5xL8vR3qT9pK7xH5sM9mN3yL7pR5xQ8vT3qK9pM7xL5sN9mH3yR7pQ5xT8vK
-3qM9pL7xN5sH9mR3yQ7pK5xL8vT3qN9pM7xH5sN9mK3yR7pQ5xT8vL3qM9pK7xN5
-sH9mR3yQ7pL5xK8vAgMBAAECggEABpQ7xR5lK8sH9mN3yL7pRzAfBgNVHSMEGDAW
-gBT1X8vN3pQ7xR5lK8sH9mN3yL7pRzAMBgNVHRMEBTADAQH/MA0GCSqGSIb3DQEB
-CwUAA4IBAQCx8K5mH3yR7pQ5xT8vK3qM9pL7xN5sH9mR3yQ7pK5xL8vT3qN9pM7x
-H5sN9mK3yR7pQ5xT8vL3qM9pK7xN5sH9mR3yQ7pL5xK8vT3qN9pM7xH5sN9mK3yR
-7pQ5xT8vL3qM9pK7xN5sH9mR3yQ7pL5xK8vT3qN9pM7xH5sN9mK3yR7pQ5xT8vL3
-qM9pK7xN5sH9mR3yQ7pL5xK8vT3qN9pM7xH5sN9mK3yR7pQ5xT8vL3qM9pK7xN5s
-H9mR3yQ7pL5xK8vT3qN9pM7xH5sN9mK3yR7pQ5xT8vL3qM9pK7xN5sH9mR3yQ7pL
-5xK8vT3qN9pM7xH5sN9mK3yR7pQ5xT8vL3qM9pK7xN5sH9mRAoGBAOVx8K5mH3yR
-7pQ5xT8vK3qM9pL7xN5sH9mR3yQ7pK5xL8vT3qN9pM7xH5sN9mK3yR7pQ5xT8vL3
-qM9pK7xN5sH9mR3yQ7pL5xK8vT3qN9pM7xH5sN9mK3yR7pQ5xT8vL3qM9pK7xN5s
-H9mR3yQ7pL5xK8vT3qN9pM7xH5sN9mK3yR7pQ5xT8vL3qM9pK7xN5sH9mR3yQ7pL
-5xK8vT3qN9pM7xH5sN9mK3yR7pQ5xT8vL3qM9pK7xN5sH9mRAoGBANHx8K5mH3yR
-7pQ5xT8vK3qM9pL7xN5sH9mR3yQ7pK5xL8vT3qN9pM7xH5sN9mK3yR7pQ5xT8vL3
-qM9pK7xN5sH9mR3yQ7pL5xK8vT3qN9pM7xH5sN9mK3yR7pQ5xT8vL3qM9pK7xN5s
-H9mR3yQ7pL5xK8vT3qN9pM7xH5sN9mK3yR7pQ5xT8vL3qM9pK7xN5sH9mR3yQ7pL
-5xK8vT3qN9pM7xH5sN9mK3yR7pQ5xT8vL3qM9pK7xN5sH9mRAoGABxQ7xR5lK8sH
-9mN3yL7pRzAfBgNVHSMEGDAWgBT1X8vN3pQ7xR5lK8sH9mN3yL7pRzAMBgNVHRME
-BTADAQECggEABpQ7xR5lK8sH9mN3yL7pRzAfBgNVHSMEGDAWgBT1X8vN3pQ7xR5l
-K8sH9mN3yL7pRzAMBgNVHRMEBTADAQH/
------END PRIVATE KEY-----
-)EOF";
 
 // Web Server
 WebServer server(WEB_SERVER_PORT);
-
-// HTTPS Proxy Server
-WiFiServerSecure httpsServer(HTTPS_PROXY_PORT);
 
 // Log buffer for web display
 std::deque<String> logBuffer;
@@ -139,12 +75,10 @@ static bool eth_connected = false;
 static bool wifi_connected = false;
 static bool napt_enabled = false;
 static bool web_server_started = false;
-static bool https_proxy_started = false;
 
 // Flags for deferred initialization (set in ISR, processed in loop)
 static volatile bool need_napt_check = false;
 static volatile bool need_web_server_start = false;
-static volatile bool need_https_proxy_start = false;
 
 // Forward declarations
 void logPrint(const String& message);
@@ -305,11 +239,6 @@ void handleRoot() {
     statusLine += "</span></div>";
     server.sendContent(statusLine);
     
-    statusLine = "<div class='status-item'>HTTPS Proxy: <span class='" + String(https_proxy_started ? "connected" : "disconnected") + "'>";
-    statusLine += https_proxy_started ? "Running" : "Stopped";
-    statusLine += "</span></div>";
-    server.sendContent(statusLine);
-    
     server.sendContent("<div class='status-item'>Target IP: " + String(TARGET_IP) + "</div>");
     server.sendContent("</div>");
     
@@ -378,7 +307,6 @@ void handleStatus() {
         json += "\"eth_ip\":null,";
     }
     json += "\"napt_enabled\":" + String(napt_enabled ? "true" : "false") + ",";
-    json += "\"https_proxy_running\":" + String(https_proxy_started ? "true" : "false") + ",";
     json += "\"uptime\":" + String(millis() / 1000) + ",";
     json += "\"target_ip\":\"" + String(TARGET_IP) + "\"";
     json += "}";
@@ -399,26 +327,6 @@ void setupWebServer() {
     logPrintln("Web server started on port " + String(WEB_SERVER_PORT));
     if (eth_connected) {
         logPrintln("Access at: http://" + ETH.localIP().toString());
-    }
-}
-
-/**
- * Setup HTTPS Proxy Server
- */
-void setupHTTPSProxy() {
-    logPrintln("Setting up HTTPS proxy server...");
-    
-    // Set the SSL certificate and key
-    httpsServer.setCertificate(server_cert);
-    httpsServer.setPrivateKey(server_key);
-    
-    // Start the HTTPS server
-    httpsServer.begin(HTTPS_PROXY_PORT);
-    
-    logPrintln("HTTPS proxy started on port " + String(HTTPS_PROXY_PORT));
-    logPrintln("Forwarding HTTPS requests to: https://" + String(TARGET_IP));
-    if (eth_connected) {
-        logPrintln("HTTPS proxy at: https://" + ETH.localIP().toString());
     }
 }
 
@@ -480,10 +388,9 @@ void EthernetEvent(WiFiEvent_t event) {
             // Configure routing
             logPrintln("Ethernet interface ready");
             
-            // Schedule NAPT, web server, and HTTPS proxy (don't do it in interrupt context)
+            // Schedule NAPT and web server (don't do it in interrupt context)
             need_napt_check = true;
             need_web_server_start = true;
-            need_https_proxy_start = true;
             break;
         case ARDUINO_EVENT_ETH_DISCONNECTED:
             logPrintln("ETH Disconnected");
@@ -491,7 +398,6 @@ void EthernetEvent(WiFiEvent_t event) {
             napt_enabled = false;  // Reset NAPT state when Ethernet disconnects
             need_napt_check = false;  // Cancel pending NAPT check
             need_web_server_start = false;  // Cancel pending web server start
-            need_https_proxy_start = false;  // Cancel pending HTTPS proxy start
             break;
         case ARDUINO_EVENT_ETH_STOP:
             logPrintln("ETH Stopped");
@@ -654,83 +560,18 @@ void setup() {
     logPrint("Traffic will be forwarded through WiFi to: ");
     logPrintln(TARGET_IP);
     logPrintln("Web interface will be available on Ethernet IP (HTTP port 80)");
-    logPrintln("HTTPS proxy will be available on Ethernet IP (HTTPS port 443)");
     logPrintln("");
 }
 
 /**
- * Handle HTTPS Proxy Connection
- * Forwards HTTPS requests from Ethernet client to TARGET_IP
+ * Main loop
  */
-void handleHTTPSProxy(WiFiClientSecure& client) {
-    logPrintln("HTTPS proxy: New client connection");
-    
-    // Create client connection to target
-    WiFiClientSecure targetClient;
-    targetClient.setInsecure();  // Accept self-signed certificates from target
-    
-    if (!targetClient.connect(TARGET_IP, 443)) {
-        logPrintln("HTTPS proxy: Failed to connect to target");
-        client.stop();
-        return;
-    }
-    
-    logPrintln("HTTPS proxy: Connected to target, proxying data...");
-    
-    uint8_t buffer[PROXY_BUFFER_SIZE];
-    unsigned long startTime = millis();
-    
-    // Proxy data bidirectionally
-    while (client.connected() && targetClient.connected()) {
-        // Check timeout
-        if (millis() - startTime > PROXY_TIMEOUT_MS) {
-            logPrintln("HTTPS proxy: Connection timeout");
-            break;
-        }
-        
-        // Client to target
-        int clientAvailable = client.available();
-        if (clientAvailable > 0) {
-            int len = client.read(buffer, min(clientAvailable, (int)PROXY_BUFFER_SIZE));
-            if (len > 0) {
-                targetClient.write(buffer, len);
-                targetClient.flush();
-                startTime = millis();  // Reset timeout on activity
-            }
-        }
-        
-        // Target to client
-        int targetAvailable = targetClient.available();
-        if (targetAvailable > 0) {
-            int len = targetClient.read(buffer, min(targetAvailable, (int)PROXY_BUFFER_SIZE));
-            if (len > 0) {
-                client.write(buffer, len);
-                client.flush();
-                startTime = millis();  // Reset timeout on activity
-            }
-        }
-        
-        // Small delay to prevent tight loop
-        delay(1);
-    }
-    
-    logPrintln("HTTPS proxy: Connection closed");
-    targetClient.stop();
-    client.stop();
-}
-
 void loop() {
     // Process deferred initialization (must be done outside interrupt context)
     if (need_web_server_start && !web_server_started && eth_connected) {
         need_web_server_start = false;
         setupWebServer();
         web_server_started = true;
-    }
-    
-    if (need_https_proxy_start && !https_proxy_started && eth_connected && wifi_connected) {
-        need_https_proxy_start = false;
-        setupHTTPSProxy();
-        https_proxy_started = true;
     }
     
     if (need_napt_check) {
@@ -743,14 +584,6 @@ void loop() {
         server.handleClient();
     }
     
-    // Handle HTTPS proxy connections
-    if (https_proxy_started && wifi_connected) {
-        WiFiClientSecure client = httpsServer.available();
-        if (client) {
-            handleHTTPSProxy(client);
-        }
-    }
-    
     // Monitor connection status
     static unsigned long lastPrint = 0;
     if (millis() - lastPrint > 10000) {  // Print every 10 seconds
@@ -761,8 +594,6 @@ void loop() {
         Serial.println(eth_connected ? "Connected" : "Disconnected");
         Serial.print("NAPT: ");
         Serial.println(napt_enabled ? "Enabled (forwarding active)" : "Disabled");
-        Serial.print("HTTPS Proxy: ");
-        Serial.println(https_proxy_started ? "Running" : "Stopped");
         
         if (wifi_connected) {
             Serial.print("WiFi IP: ");
@@ -784,8 +615,6 @@ void loop() {
         logPrintln(eth_connected ? "Connected" : "Disconnected");
         logPrint("NAPT: ");
         logPrintln(napt_enabled ? "Enabled (forwarding active)" : "Disabled");
-        logPrint("HTTPS Proxy: ");
-        logPrintln(https_proxy_started ? "Running" : "Stopped");
         
         if (wifi_connected) {
             logPrint("WiFi IP: ");
