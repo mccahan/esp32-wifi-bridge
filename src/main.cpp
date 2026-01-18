@@ -15,8 +15,8 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
-#include <SPI.h>
 #include <ETH.h>
+#include <SPI.h>
 #include <WebServer.h>
 #include <deque>
 
@@ -343,7 +343,11 @@ void setupEthernet() {
     WiFi.onEvent(EthernetEvent);
     
     // Initialize SPI for W5500
+    logPrintln("Initializing SPI bus...");
     SPI.begin(ETH_SCLK_GPIO, ETH_MISO_GPIO, ETH_MOSI_GPIO, ETH_CS_GPIO);
+    
+    // Give SPI time to initialize
+    delay(100);
     
     // Initialize Ethernet with W5500 via SPI
     // ESP32-S3-ETH uses W5500 chip, not RMII PHY
