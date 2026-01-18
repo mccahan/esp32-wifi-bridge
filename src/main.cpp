@@ -1,13 +1,11 @@
 #include <Arduino.h>
-#include <WiFi.h>
-#include <WiFiClient.h>
-#include <ESPmDNS.h>
 #include <SPI.h>
 #include "config.h"
 #include "cert.h"
 #include <lwip/sockets.h>
 
 // WebServer_ESP32_SC_W5500 library for W5500 support on ESP32-S3
+// IMPORTANT: Must be included before WiFi.h to avoid conflicts
 #define DEBUG_ETHERNET_WEBSERVER_PORT Serial
 #define _ETHERNET_WEBSERVER_LOGLEVEL_ 3
 
@@ -20,6 +18,11 @@
 
 #define USE_ETHERNET_WRAPPER  true
 #include <WebServer_ESP32_SC_W5500.h>
+
+// WiFi libraries - must come after WebServer_ESP32_SC_W5500.h
+#include <WiFi.h>
+#include <WiFiClient.h>
+#include <ESPmDNS.h>
 
 /*
  * HTTPS/TLS Implementation Note:
