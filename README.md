@@ -7,7 +7,7 @@ A WiFi to Ethernet bridge implementation for the ESP32-S3-ETH (Waveshare) board 
 - **Transparent Bridging**: Routes traffic from Ethernet clients through ESP32's WiFi connection
 - **Automatic Packet Forwarding**: ESP32-S3 handles forwarding between interfaces automatically
 - **Target IP Routing**: Specifically configured to route to 192.168.91.1 (e.g., Tesla Powerwall AP)
-- **Hardware Support**: Optimized for ESP32-S3-ETH (Waveshare) with LAN8720A PHY
+- **Hardware Support**: Optimized for ESP32-S3-ETH (Waveshare) with W5500 SPI Ethernet
 - **Web Interface**: Built-in web server for viewing logs and monitoring status from Ethernet
 - **PlatformIO Build**: Easy building and flashing with PlatformIO
 - **GitHub Actions CI**: Automated builds on push
@@ -15,11 +15,11 @@ A WiFi to Ethernet bridge implementation for the ESP32-S3-ETH (Waveshare) board 
 ## Hardware Requirements
 
 - **Board**: [ESP32-S3-ETH](https://www.waveshare.com/wiki/ESP32-S3-ETH) (Waveshare)
-- **Ethernet PHY**: LAN8720A (integrated on board)
+- **Ethernet PHY**: W5500 (SPI-based, integrated on board)
 - **Features**:
-  - Power over Ethernet (PoE) support
+  - Power over Ethernet (PoE) support (with optional PoE module)
   - WiFi 802.11 b/g/n
-  - 10/100 Mbps Ethernet
+  - 10/100 Mbps Ethernet via W5500 chip
 
 ## Getting Started
 
@@ -123,15 +123,19 @@ This bridge is designed to connect to a Tesla Powerwall's WiFi AP and expose its
 
 ## Pin Configuration (ESP32-S3-ETH)
 
-The code uses `ETH.begin()` without parameters, which relies on the ESP32-S3-ETH board's default configuration:
+The code configures the W5500 Ethernet chip connected via SPI on the ESP32-S3-ETH board:
 
-- **ETH PHY Type**: LAN8720 (board default)
-- **PHY Address**: 1
-- **MDC**: GPIO 23
-- **MDIO**: GPIO 18
-- **Clock Mode**: GPIO0 (external clock input)
+- **Ethernet Chip**: W5500 (SPI-based, not RMII)
+- **SPI Bus**: SPI2_HOST
+- **MISO**: GPIO 12
+- **MOSI**: GPIO 11
+- **SCLK**: GPIO 13
+- **CS**: GPIO 14
+- **RST**: GPIO 9
+- **INT**: GPIO 10
+- **SPI Clock**: 20 MHz
 
-These pins are pre-configured in the ESP32-S3-ETH board definition and don't need to be specified in the code.
+These pins are defined in the source code for the Waveshare ESP32-S3-ETH board.
 
 ## Building with GitHub Actions
 

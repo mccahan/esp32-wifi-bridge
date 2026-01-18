@@ -6,14 +6,16 @@
  * 
  * Hardware: ESP32-S3-ETH (Waveshare)
  * Features:
- * - Ethernet PHY: LAN8720A
+ * - Ethernet PHY: W5500 (SPI-based)
  * - WiFi Client mode connection
  * - IP forwarding/NAT from Ethernet to WiFi
  * - Proxies requests to target IP (192.168.91.1)
+ * - Web interface for monitoring
  */
 
 #include <Arduino.h>
 #include <WiFi.h>
+#include <SPI.h>
 #include <ETH.h>
 #include <WebServer.h>
 #include <deque>
@@ -30,6 +32,17 @@
 #ifndef TARGET_IP
 #define TARGET_IP "192.168.91.1"
 #endif
+
+// ESP32-S3-ETH (Waveshare) W5500 Pin Configuration
+// Based on https://www.waveshare.com/wiki/ESP32-S3-ETH
+#define ETH_SPI_HOST      SPI2_HOST
+#define ETH_SPI_CLOCK_MHZ 20
+#define ETH_MISO_GPIO     12
+#define ETH_MOSI_GPIO     11
+#define ETH_SCLK_GPIO     13
+#define ETH_CS_GPIO       14
+#define ETH_RST_GPIO      9
+#define ETH_INT_GPIO      10
 
 // Network Configuration
 // Ethernet will use DHCP to obtain IP address
@@ -329,18 +342,24 @@ void setupEthernet() {
     // Register event handler
     WiFi.onEvent(EthernetEvent);
     
-    // Initialize Ethernet with default settings for ESP32-S3-ETH
-    // The board has integrated LAN8720 PHY with predefined pins
-    // Using the parameterless begin() which uses board defaults
-    if (!ETH.begin()) {
+    // Initialize SPI for W5500
+    SPI.begin(ETH_SCLK_GPIO, ETH_MISO_GPIO, ETH_MOSI_GPIO, ETH_CS_GPIO);
+    
+    // Initialize Ethernet with W5500 via SPI
+    // ESP32-S3-ETH uses W5500 chip, not RMII PHY
+    logPrintln("Initializing W5500 Ethernet chip...");
+    if (!ETH.begin(ETH_PHY_W5500, ETH_CS_GPIO, ETH_INT_GPIO, ETH_RST_GPIO, SPI, ETH_SPI_CLOCK_MHZ)) {
         logPrintln("ETH initialization failed!");
+        logPrintln("Check W5500 SPI connections:");
+        logPrintln("  MISO: GPIO12, MOSI: GPIO11, SCLK: GPIO13");
+        logPrintln("  CS: GPIO14, RST: GPIO9, INT: GPIO10");
         return;
     }
     
     // Set hostname after initialization
     ETH.setHostname("esp32-bridge");
     
-    logPrintln("Ethernet initialized - waiting for DHCP...");
+    logPrintln("W5500 Ethernet initialized - waiting for DHCP...");
 }
 
 void setup() {
