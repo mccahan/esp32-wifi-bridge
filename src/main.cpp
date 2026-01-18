@@ -47,8 +47,6 @@
 // State tracking
 static bool eth_connected = false;
 static bool wifi_connected = false;
-static uint8_t client_mac[6] = {0};
-static bool mac_learned = false;
 
 /**
  * WiFi Event Handler
@@ -66,7 +64,7 @@ void WiFiEvent(WiFiEvent_t event) {
             Serial.println(WiFi.localIP());
             wifi_connected = true;
             
-            // Enable NAT on WiFi interface for forwarding
+            // Enable NAT on WiFi interface for forwarding (second param: 1 = enable)
             ip_napt_enable(WiFi.localIP(), 1);
             Serial.println("NAT enabled on WiFi interface");
             break;
@@ -181,7 +179,16 @@ void setupEthernet() {
 void setupNAPT() {
     Serial.println("Configuring NAPT...");
     
-    // Initialize NAPT
+    // Initialize NAPT with maximum values
+    // IP_NAPT_MAX: maximum number of NAT entries (default 512)
+    // IP_PORTMAP_MAX: maximum number of port mappings (default 32)
+    #ifndef IP_NAPT_MAX
+    #define IP_NAPT_MAX 512
+    #endif
+    #ifndef IP_PORTMAP_MAX
+    #define IP_PORTMAP_MAX 32
+    #endif
+    
     ip_napt_init(IP_NAPT_MAX, IP_PORTMAP_MAX);
     
     Serial.println("NAPT initialized - bridge is ready");
