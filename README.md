@@ -8,6 +8,7 @@ A WiFi to Ethernet bridge implementation for the ESP32-S3-ETH (Waveshare) board 
 - **NAT/NAPT Support**: Network Address Port Translation for seamless proxying
 - **Target IP Routing**: Specifically configured to route to 192.168.91.1 (e.g., Tesla Powerwall AP)
 - **Hardware Support**: Optimized for ESP32-S3-ETH (Waveshare) with LAN8720A PHY
+- **Web Interface**: Built-in web server for viewing logs and monitoring status from Ethernet
 - **PlatformIO Build**: Easy building and flashing with PlatformIO
 - **GitHub Actions CI**: Automated builds on push
 
@@ -59,15 +60,34 @@ The ESP32 will:
 2. Connect to the Ethernet network and obtain an IP via DHCP
 3. Bridge traffic between Ethernet and WiFi interfaces
 4. Forward all traffic through WiFi to the target network
+5. Provide a web interface on the Ethernet IP for monitoring
 
 The Ethernet interface will automatically obtain its IP address from the network's DHCP server.
+
+### Web Interface
+
+Once the ESP32 obtains an Ethernet IP address via DHCP, you can access the web interface by opening a browser and navigating to the Ethernet IP address (displayed in serial output).
+
+The web interface provides:
+- **Real-time Status**: WiFi and Ethernet connection status
+- **Network Information**: IP addresses, MAC addresses, gateway info
+- **Device Logs**: Last 100 log entries with timestamps
+- **Auto-refresh**: Optional auto-refresh every 3 seconds
+
+Endpoints:
+- `/` - Main web interface with logs and status
+- `/logs` - Plain text logs (useful for debugging)
+- `/status` - JSON status API
+
+Example: If the ESP32 gets Ethernet IP `192.168.1.100`, access the web interface at `http://192.168.1.100`
 
 ## How It Works
 
 1. **WiFi Connection**: ESP32 connects to the specified WiFi network as a station
 2. **Ethernet Interface**: Connects to Ethernet and obtains IP via DHCP
-3. **NAPT (NAT)**: Translates packets from Ethernet to appear as coming from the ESP32's WiFi IP
-4. **Routing**: All traffic is forwarded to the WiFi network, enabling access to 192.168.91.1 or any other target
+3. **Bridging**: Routes packets between Ethernet and WiFi interfaces
+4. **Web Server**: Provides HTTP interface on Ethernet for monitoring and logs
+5. **Traffic Routing**: All traffic is forwarded to the WiFi network, enabling access to 192.168.91.1 or any other target
 
 ## Use Case: Tesla Powerwall
 
