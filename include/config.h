@@ -11,6 +11,7 @@
 #define POWERWALL_IP_ADDR2 168
 #define POWERWALL_IP_ADDR3 91
 #define POWERWALL_IP_ADDR4 1
+#define POWERWALL_IP_STR "192.168.91.1"
 
 // ===== Ethernet Configuration =====
 // MAC address for W5500 Ethernet (change if you have multiple devices)
