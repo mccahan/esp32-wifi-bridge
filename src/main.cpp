@@ -352,7 +352,8 @@ void setupEthernet() {
     // Initialize Ethernet with W5500 via SPI
     // ESP32-S3-ETH uses W5500 chip, not RMII PHY
     logPrintln("Initializing W5500 Ethernet chip...");
-    if (!ETH.begin(ETH_PHY_W5500, ETH_CS_GPIO, ETH_INT_GPIO, ETH_RST_GPIO, SPI, ETH_SPI_CLOCK_MHZ)) {
+    // ETH.begin signature: (type, phy_addr, cs, irq, rst, spi, spi_freq_mhz)
+    if (!ETH.begin(ETH_PHY_W5500, 1, ETH_CS_GPIO, ETH_INT_GPIO, ETH_RST_GPIO, SPI, ETH_SPI_CLOCK_MHZ)) {
         logPrintln("ETH initialization failed!");
         logPrintln("Check W5500 SPI connections:");
         logPrintln("  MISO: GPIO12, MOSI: GPIO11, SCLK: GPIO13");
