@@ -129,10 +129,6 @@ static esp_err_t init_ethernet(void)
     esp_netif_config_t cfg = ESP_NETIF_DEFAULT_ETH();
     eth_netif = esp_netif_new(&cfg);
 
-    // Set MAC address
-    uint8_t mac_addr[6] = ETH_MAC_ADDR;
-    ESP_ERROR_CHECK(esp_netif_set_mac(eth_netif, mac_addr));
-
     // Register event handlers
     ESP_ERROR_CHECK(esp_event_handler_register(ETH_EVENT, ESP_EVENT_ANY_ID, &eth_event_handler, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_GOT_IP, &got_ip_event_handler, NULL));
@@ -162,6 +158,7 @@ static esp_err_t init_ethernet(void)
     eth_w5500_config_t w5500_config = ETH_W5500_DEFAULT_CONFIG(SPI3_HOST, &spi_devcfg);
     w5500_config.int_gpio_num = W5500_INT_GPIO;
 
+    // Configure MAC and PHY
     eth_mac_config_t mac_config = ETH_MAC_DEFAULT_CONFIG();
     eth_phy_config_t phy_config = ETH_PHY_DEFAULT_CONFIG();
     phy_config.reset_gpio_num = -1;
@@ -171,6 +168,12 @@ static esp_err_t init_ethernet(void)
 
     esp_eth_config_t config = ETH_DEFAULT_CONFIG(mac, phy);
     ESP_ERROR_CHECK(esp_eth_driver_install(&config, &eth_handle));
+
+    // Set custom MAC address (W5500 doesn't have burned-in MAC)
+    uint8_t mac_addr[6] = ETH_MAC_ADDR;
+    ESP_ERROR_CHECK(esp_eth_ioctl(eth_handle, ETH_CMD_S_MAC_ADDR, mac_addr));
+    ESP_LOGI(TAG, "MAC Address set to: %02x:%02x:%02x:%02x:%02x:%02x",
+             mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5]);
 
     // Attach Ethernet driver to TCP/IP stack
     ESP_ERROR_CHECK(esp_netif_attach(eth_netif, esp_eth_new_netif_glue(eth_handle)));
