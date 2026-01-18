@@ -138,8 +138,10 @@ void enableNAPT() {
     // This allows packets from Ethernet to be forwarded to WiFi with address translation
     IPAddress wifi_ip = WiFi.localIP();
     
-    // ip_napt_enable returns void, so we just call it and assume success
+    // Must lock TCPIP core before calling lwIP NAPT functions
+    LOCK_TCPIP_CORE();
     ip_napt_enable(wifi_ip, 1);
+    UNLOCK_TCPIP_CORE();
     
     Serial.println("NAPT enabled on WiFi interface");
     Serial.print("Forwarding Ethernet traffic through WiFi (");
