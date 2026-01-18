@@ -123,13 +123,15 @@ This bridge is designed to connect to a Tesla Powerwall's WiFi AP and expose its
 
 ## Pin Configuration (ESP32-S3-ETH)
 
-The code is pre-configured for the Waveshare ESP32-S3-ETH board:
+The code uses `ETH.begin()` without parameters, which relies on the ESP32-S3-ETH board's default configuration:
 
-- **ETH PHY Type**: LAN8720
+- **ETH PHY Type**: LAN8720 (board default)
 - **PHY Address**: 1
 - **MDC**: GPIO 23
 - **MDIO**: GPIO 18
 - **Clock Mode**: GPIO0 (external clock input)
+
+These pins are pre-configured in the ESP32-S3-ETH board definition and don't need to be specified in the code.
 
 ## Building with GitHub Actions
 

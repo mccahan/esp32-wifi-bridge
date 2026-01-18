@@ -16,7 +16,6 @@
 #include <WiFi.h>
 #include <ETH.h>
 #include <WebServer.h>
-#include <vector>
 #include <deque>
 
 // Configuration from build flags
@@ -169,6 +168,7 @@ void handleRoot() {
  */
 void handleLogs() {
     String logs = "";
+    logs.reserve(logBuffer.size() * 80);  // Pre-allocate approximate space
     for (const auto& entry : logBuffer) {
         logs += entry;
     }
@@ -231,8 +231,7 @@ void WiFiEvent(WiFiEvent_t event) {
             logPrintln(WiFi.localIP().toString());
             wifi_connected = true;
             
-            // Note: NAT configuration for ESP32-S3 
-            // IP forwarding is enabled by default when both interfaces are active
+            // ESP32-S3 automatically forwards packets when both interfaces are active
             logPrintln("WiFi interface ready for bridging");
             break;
         case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
