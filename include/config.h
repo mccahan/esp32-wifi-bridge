@@ -28,6 +28,8 @@
 // ===== Proxy Server Configuration =====
 #define PROXY_PORT 443
 #define PROXY_TIMEOUT_MS 30000  // 30 seconds
+#define PROXY_BUFFER_SIZE 2048  // TLS record buffer size
+#define HTTPS_CLIENT_TASK_STACK_SIZE 8192  // Stack size per client task
 
 // ===== mDNS Configuration =====
 #define MDNS_HOSTNAME "powerwall"

@@ -238,8 +238,6 @@ static void handle_client_task(void *pvParameters)
 
     // Server-side TLS configuration (accept connections with self-signed cert)
     esp_tls_cfg_server_t server_cfg = {
-        .cacert_buf = (const unsigned char *)server_cert_pem_start,
-        .cacert_bytes = server_cert_pem_end - server_cert_pem_start,
         .servercert_buf = (const unsigned char *)server_cert_pem_start,
         .servercert_bytes = server_cert_pem_end - server_cert_pem_start,
         .serverkey_buf = (const unsigned char *)server_key_pem_start,
@@ -282,7 +280,7 @@ static void handle_client_task(void *pvParameters)
         return;
     }
 
-    ret = esp_tls_conn_new_sync(POWERWALL_IP_STR, strlen(POWERWALL_IP_STR), 443, &powerwall_cfg, powerwall_tls);
+    ret = esp_tls_conn_new_sync(POWERWALL_IP_STR, 0, 443, &powerwall_cfg, powerwall_tls);
     if (ret != 1) {
         ESP_LOGE(TAG, "Failed to connect to Powerwall via TLS");
         esp_tls_conn_destroy(powerwall_tls);
@@ -295,7 +293,7 @@ static void handle_client_task(void *pvParameters)
     ESP_LOGI(TAG, "TLS connection to Powerwall established");
 
     // Proxy decrypted HTTP data bidirectionally
-    uint8_t *buffer = malloc(2048);
+    uint8_t *buffer = malloc(PROXY_BUFFER_SIZE);
     if (!buffer) {
         ESP_LOGE(TAG, "Failed to allocate proxy buffer");
         esp_tls_conn_destroy(powerwall_tls);
@@ -313,7 +311,7 @@ static void handle_client_task(void *pvParameters)
         struct timeval tv = {.tv_sec = 0, .tv_usec = 100000};
         
         // Client -> Powerwall
-        int len = esp_tls_conn_read(client_tls, buffer, 2048);
+        int len = esp_tls_conn_read(client_tls, buffer, PROXY_BUFFER_SIZE);
         if (len > 0) {
             int written = esp_tls_conn_write(powerwall_tls, buffer, len);
             if (written < 0) {
@@ -327,7 +325,7 @@ static void handle_client_task(void *pvParameters)
         }
 
         // Powerwall -> Client  
-        len = esp_tls_conn_read(powerwall_tls, buffer, 2048);
+        len = esp_tls_conn_read(powerwall_tls, buffer, PROXY_BUFFER_SIZE);
         if (len > 0) {
             int written = esp_tls_conn_write(client_tls, buffer, len);
             if (written < 0) {
@@ -414,7 +412,12 @@ static void tcp_server_task(void *pvParameters)
 
         // Spawn a new task to handle each client connection
         // This allows multiple simultaneous connections
-        xTaskCreate(handle_client_task, "https_client", 8192, (void *)client_sock, 5, NULL);
+        BaseType_t task_created = xTaskCreate(handle_client_task, "https_client", 
+                                               HTTPS_CLIENT_TASK_STACK_SIZE, (void *)client_sock, 5, NULL);
+        if (task_created != pdPASS) {
+            ESP_LOGE(TAG, "Failed to create client handler task");
+            close(client_sock);
+        }
     }
 
     close(server_socket);
