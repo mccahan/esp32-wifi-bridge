@@ -158,6 +158,18 @@ I (3288) wifi-eth-bridge: TCP Server (SSL passthrough) listening on port 443
 I (3298) wifi-eth-bridge: Ready to forward encrypted SSL/TLS traffic to Powerwall (192.168.91.1:443) with TTL modification
 ```
 
+## Migration from TLS Termination to SSL Passthrough
+
+The project was recently updated from a TLS termination proxy to an SSL passthrough bridge:
+- **Before**: Decrypted HTTPS traffic using esp_tls, inspected/modified HTTP, then re-encrypted
+- **After**: Forwards encrypted SSL/TLS traffic without decryption, only modifies TTL
+- **Reason**: Simplifies architecture, reduces overhead, maintains end-to-end encryption, and hides external origin through TTL modification
+
+### Key Changes:
+- **Removed**: TLS termination with esp_tls, self-signed certificates, HTTP inspection
+- **Added**: Direct TCP socket forwarding, TTL modification via setsockopt(IP_TTL)
+- **Benefit**: Lower memory usage, simpler code, true end-to-end encryption
+
 ## Migration from Arduino
 
 This project was migrated from Arduino framework to ESP-IDF to resolve W5500 library compatibility issues. ESP-IDF provides native, fully-supported W5500 drivers through the `esp_eth` component.
