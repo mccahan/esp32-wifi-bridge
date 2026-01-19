@@ -240,7 +240,7 @@ static void handle_client_task(void *pvParameters)
     powerwall_addr.sin_port = htons(443);
     inet_pton(AF_INET, POWERWALL_IP_STR, &powerwall_addr.sin_addr);
 
-    int powerwall_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
+    int powerwall_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (powerwall_sock < 0) {
         ESP_LOGE(TAG, "Failed to create socket to Powerwall");
         close(client_sock);
