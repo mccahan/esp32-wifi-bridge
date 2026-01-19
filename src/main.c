@@ -229,6 +229,21 @@ static void init_mdns(void)
     ESP_LOGI(TAG, "mDNS service added: %s.%s on port %d", MDNS_SERVICE, MDNS_PROTOCOL, PROXY_PORT);
 }
 
+/** Case-insensitive string search helper */
+static char* stristr(const char* haystack, const char* needle) {
+    if (!haystack || !needle) return NULL;
+    
+    size_t needle_len = strlen(needle);
+    if (needle_len == 0) return (char*)haystack;
+    
+    for (; *haystack; haystack++) {
+        if (strncasecmp(haystack, needle, needle_len) == 0) {
+            return (char*)haystack;
+        }
+    }
+    return NULL;
+}
+
 /** HTTPS Proxy task with TLS termination - handles decrypt/re-encrypt */
 static void handle_client_task(void *pvParameters)
 {
@@ -314,20 +329,73 @@ static void handle_client_task(void *pvParameters)
     const TickType_t timeout_ticks = pdMS_TO_TICKS(PROXY_TIMEOUT_MS);
     bool keep_alive = true;  // Track connection keep-alive preference
     bool first_client_request = true;  // Track first request to log start-line
+    
+    // Request buffering for complete HTTP request reception
+    uint8_t *request_buffer = malloc(PROXY_BUFFER_SIZE * 4);  // Larger buffer for full request
+    if (!request_buffer) {
+        ESP_LOGE(TAG, "Failed to allocate request buffer");
+        free(buffer);
+        esp_tls_conn_destroy(powerwall_tls);
+        esp_tls_conn_destroy(client_tls);
+        close(client_sock);
+        vTaskDelete(NULL);
+        return;
+    }
+    int request_len = 0;
+    bool request_complete = false;
 
     while (1) {
         // Set read timeout for non-blocking behavior
         struct timeval tv = {.tv_sec = 0, .tv_usec = 100000};
         
-        // Client -> Powerwall
-        int len = esp_tls_conn_read(client_tls, buffer, PROXY_BUFFER_SIZE);
-        if (len > 0) {
+        // Client -> Powerwall: Read complete request before forwarding
+        if (!request_complete) {
+            int len = esp_tls_conn_read(client_tls, buffer, PROXY_BUFFER_SIZE);
+            if (len > 0) {
+                // Append to request buffer
+                if (request_len + len < PROXY_BUFFER_SIZE * 4) {
+                    memcpy(request_buffer + request_len, buffer, len);
+                    request_len += len;
+                    
+                    // Check if we have complete HTTP request (ends with \r\n\r\n for headers)
+                    // For POST/PUT with body, check Content-Length
+                    if (request_len >= 4) {
+                        char *headers_end = strstr((char*)request_buffer, "\r\n\r\n");
+                        if (headers_end) {
+                            int headers_len = headers_end - (char*)request_buffer + 4;
+                            
+                            // Check for Content-Length header
+                            char *content_length_str = stristr((char*)request_buffer, "\r\nContent-Length:");
+                            int content_length = 0;
+                            if (content_length_str && content_length_str < headers_end) {
+                                sscanf(content_length_str, "\r\nContent-Length: %d", &content_length);
+                            }
+                            
+                            // Request is complete if headers are complete and we have all body data
+                            if (request_len >= headers_len + content_length) {
+                                request_complete = true;
+                            }
+                        }
+                    }
+                } else {
+                    ESP_LOGE(TAG, "Request too large, buffer overflow");
+                    break;
+                }
+                last_activity = xTaskGetTickCount();
+            } else if (len < 0 && len != ESP_TLS_ERR_SSL_WANT_READ && len != ESP_TLS_ERR_SSL_WANT_WRITE) {
+                ESP_LOGI(TAG, "Client connection closed or error: %d", len);
+                break;
+            }
+        }
+        
+        // Once we have complete request, process and forward it
+        if (request_complete) {
             // Log client start-line on first request
-            if (first_client_request && len >= 4) {
+            if (first_client_request && request_len >= 4) {
                 char start_line[256] = {0};
                 int i;
-                for (i = 0; i < len && i < 255 && buffer[i] != '\r' && buffer[i] != '\n'; i++) {
-                    start_line[i] = buffer[i];
+                for (i = 0; i < request_len && i < 255 && request_buffer[i] != '\r' && request_buffer[i] != '\n'; i++) {
+                    start_line[i] = request_buffer[i];
                 }
                 start_line[i] = '\0';
                 ESP_LOGI(TAG, "Client request: %s", start_line);
@@ -336,26 +404,42 @@ static void handle_client_task(void *pvParameters)
             
             // Debug mode: show full packet from client
             #if DEBUG_MODE
-            ESP_LOGI(TAG, "Client packet (%d bytes):", len);
-            ESP_LOG_BUFFER_HEXDUMP(TAG, buffer, len, ESP_LOG_INFO);
-            ESP_LOGI(TAG, "Client packet (text): %.*s", len, buffer);
+            ESP_LOGI(TAG, "Client request (%d bytes):", request_len);
+            ESP_LOG_BUFFER_HEXDUMP(TAG, request_buffer, request_len, ESP_LOG_INFO);
+            ESP_LOGI(TAG, "Client request (text): %.*s", request_len, request_buffer);
             #endif
             
             // Check for Connection: close header in client request
-            if (len >= 17 && strstr((char*)buffer, "Connection: close")) {
+            if (request_len >= 17 && strstr((char*)request_buffer, "Connection: close")) {
                 keep_alive = false;
                 ESP_LOGI(TAG, "Client requested connection close");
             }
             
-            int written = esp_tls_conn_write(powerwall_tls, buffer, len);
+            // Remove Accept-Encoding header to prevent gzip/deflate compression
+            char *accept_encoding = stristr((char*)request_buffer, "\r\nAccept-Encoding:");
+            if (accept_encoding) {
+                // Find the end of this header line
+                char *header_end = strstr(accept_encoding + 2, "\r\n");
+                if (header_end) {
+                    // Remove the entire Accept-Encoding header line
+                    int header_line_len = header_end - accept_encoding;
+                    memmove(accept_encoding, header_end, request_len - (header_end - (char*)request_buffer));
+                    request_len -= header_line_len;
+                    ESP_LOGI(TAG, "Removed Accept-Encoding header from client request");
+                }
+            }
+            
+            // Forward complete request to Powerwall
+            int written = esp_tls_conn_write(powerwall_tls, request_buffer, request_len);
             if (written < 0) {
                 ESP_LOGE(TAG, "Error writing to Powerwall");
                 break;
             }
+            
+            // Reset for next request
+            request_len = 0;
+            request_complete = false;
             last_activity = xTaskGetTickCount();
-        } else if (len < 0 && len != ESP_TLS_ERR_SSL_WANT_READ && len != ESP_TLS_ERR_SSL_WANT_WRITE) {
-            ESP_LOGI(TAG, "Client connection closed or error: %d", len);
-            break;
         }
 
         // Powerwall -> Client  
@@ -418,6 +502,7 @@ static void handle_client_task(void *pvParameters)
     }
 
     free(buffer);
+    free(request_buffer);
     esp_tls_conn_destroy(powerwall_tls);
     esp_tls_conn_destroy(client_tls);
     close(client_sock);
