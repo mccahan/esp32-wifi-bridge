@@ -268,7 +268,7 @@ static void handle_client_task(void *pvParameters)
     // Client-side TLS configuration (connect to Powerwall, skip verification)
     // Skip certificate verification entirely for self-signed Powerwall cert
     esp_tls_cfg_t powerwall_cfg = {
-        .skip_cert_common_name_check = true,
+        .skip_common_name = true,
         .non_block = false,
         .timeout_ms = 10000,
     };
