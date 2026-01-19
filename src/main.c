@@ -313,6 +313,10 @@ static void handle_client_task(void *pvParameters)
 
     TickType_t last_activity = xTaskGetTickCount();
     const TickType_t timeout_ticks = pdMS_TO_TICKS(PROXY_TIMEOUT_MS);
+    
+    // Track request/response timing for performance logging
+    TickType_t request_sent_time = 0;
+    bool awaiting_response = false;
 
     // Bidirectional forwarding loop using select() for efficient I/O multiplexing
     while (1) {
@@ -343,6 +347,10 @@ static void handle_client_task(void *pvParameters)
         if (FD_ISSET(client_sock, &read_fds)) {
             int len = recv(client_sock, client_buffer, PROXY_BUFFER_SIZE, 0);
             if (len > 0) {
+                // Record request sent time for response time tracking
+                request_sent_time = xTaskGetTickCount();
+                awaiting_response = true;
+                
                 // Forward encrypted data to Powerwall with retry limit
                 int total_sent = 0;
                 int retry_count = 0;
@@ -388,6 +396,14 @@ static void handle_client_task(void *pvParameters)
         if (FD_ISSET(powerwall_sock, &read_fds)) {
             int len = recv(powerwall_sock, powerwall_buffer, PROXY_BUFFER_SIZE, 0);
             if (len > 0) {
+                // Calculate and log response time if we were awaiting a response
+                if (awaiting_response) {
+                    TickType_t response_time = xTaskGetTickCount() - request_sent_time;
+                    uint32_t response_time_ms = response_time * portTICK_PERIOD_MS;
+                    ESP_LOGI(TAG, "Response time: %lu ms", (unsigned long)response_time_ms);
+                    awaiting_response = false;
+                }
+                
                 // Forward encrypted data to client with retry limit
                 int total_sent = 0;
                 int retry_count = 0;
