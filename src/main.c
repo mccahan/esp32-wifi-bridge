@@ -590,8 +590,8 @@ void app_main(void)
     // Initialize mDNS
     init_mdns();
 
-    // Start WiFi quality monitoring task
-    xTaskCreate(wifi_quality_monitor_task, "wifi_monitor", 2048, NULL, 3, NULL);
+    // Start WiFi quality monitoring task (increased stack size for logging)
+    xTaskCreate(wifi_quality_monitor_task, "wifi_monitor", 3072, NULL, 3, NULL);
 
     // Start TCP server task
     xTaskCreate(tcp_server_task, "tcp_server", 4096, NULL, 5, NULL);
