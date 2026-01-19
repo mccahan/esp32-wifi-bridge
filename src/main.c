@@ -267,14 +267,17 @@ static void handle_client_task(void *pvParameters)
 
     // Client-side TLS configuration (connect to Powerwall, skip verification)
     // Skip certificate verification entirely for self-signed Powerwall cert
-    // Setting if_name satisfies "server verification option set" requirement when combined with other flags
+    // With CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY=y, we can use skip_cert_verify field
     esp_tls_cfg_t powerwall_cfg = {
         .skip_common_name = true,
         .use_global_ca_store = false,
         .crt_bundle_attach = NULL,
         .non_block = false,
         .timeout_ms = 10000,
-        .if_name = NULL,  // Setting if_name field (even to NULL) satisfies verification option requirement
+        .if_name = NULL,
+#ifdef CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY
+        .skip_cert_verify = true,  // Available when CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY is enabled
+#endif
     };
 
     // Connect to Powerwall with TLS
