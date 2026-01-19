@@ -275,9 +275,6 @@ static void handle_client_task(void *pvParameters)
         .non_block = false,
         .timeout_ms = 10000,
         .if_name = NULL,
-#ifdef CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY
-        .skip_cert_verify = true,  // Available when CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY is enabled
-#endif
     };
 
     // Connect to Powerwall with TLS
