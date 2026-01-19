@@ -334,6 +334,13 @@ static void handle_client_task(void *pvParameters)
                 first_client_request = false;
             }
             
+            // Debug mode: show full packet from client
+            #if DEBUG_MODE
+            ESP_LOGI(TAG, "Client packet (%d bytes):", len);
+            ESP_LOG_BUFFER_HEXDUMP(TAG, buffer, len, ESP_LOG_INFO);
+            ESP_LOGI(TAG, "Client packet (text): %.*s", len, buffer);
+            #endif
+            
             // Check for Connection: close header in client request
             if (len >= 17 && strstr((char*)buffer, "Connection: close")) {
                 keep_alive = false;
