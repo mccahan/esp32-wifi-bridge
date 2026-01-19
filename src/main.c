@@ -266,9 +266,9 @@ static void handle_client_task(void *pvParameters)
     ESP_LOGI(TAG, "TLS handshake with client successful");
 
     // Client-side TLS configuration (connect to Powerwall, skip verification)
-    // Provide empty CA cert to satisfy esp_tls verification requirement while skipping actual verification
+    // Skip certificate common name verification for self-signed Powerwall cert
     esp_tls_cfg_t powerwall_cfg = {
-        .skip_cert_verify = true,
+        .skip_common_name = true,
         .non_block = false,
         .timeout_ms = 10000,
     };
