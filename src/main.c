@@ -29,6 +29,7 @@
 
 #include "config.h"
 #include "cert.h"
+#include "certs.h"
 
 static const char *TAG = "wifi-eth-bridge";
 
@@ -238,10 +239,10 @@ static void handle_client_task(void *pvParameters)
 
     // Server-side TLS configuration (accept connections with self-signed cert)
     esp_tls_cfg_server_t server_cfg = {
-        .servercert_buf = (const unsigned char *)server_cert_pem_start,
-        .servercert_bytes = server_cert_pem_end - server_cert_pem_start,
-        .serverkey_buf = (const unsigned char *)server_key_pem_start,
-        .serverkey_bytes = server_key_pem_end - server_key_pem_start,
+        .servercert_buf = (const unsigned char *)server_cert_pem,
+        .servercert_bytes = sizeof(server_cert_pem),
+        .serverkey_buf = (const unsigned char *)server_key_pem,
+        .serverkey_bytes = sizeof(server_key_pem),
     };
 
     // Create TLS connection for client (server role)
