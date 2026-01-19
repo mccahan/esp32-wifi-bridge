@@ -269,6 +269,8 @@ static void handle_client_task(void *pvParameters)
     // Skip certificate verification entirely for self-signed Powerwall cert
     esp_tls_cfg_t powerwall_cfg = {
         .skip_common_name = true,
+        .use_global_ca_store = false,
+        .crt_bundle_attach = NULL,
         .non_block = false,
         .timeout_ms = 10000,
     };
