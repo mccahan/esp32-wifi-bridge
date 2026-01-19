@@ -313,6 +313,7 @@ static void handle_client_task(void *pvParameters)
     TickType_t last_activity = xTaskGetTickCount();
     const TickType_t timeout_ticks = pdMS_TO_TICKS(PROXY_TIMEOUT_MS);
     bool keep_alive = true;  // Track connection keep-alive preference
+    bool first_client_request = true;  // Track first request to log start-line
 
     while (1) {
         // Set read timeout for non-blocking behavior
@@ -321,6 +322,18 @@ static void handle_client_task(void *pvParameters)
         // Client -> Powerwall
         int len = esp_tls_conn_read(client_tls, buffer, PROXY_BUFFER_SIZE);
         if (len > 0) {
+            // Log client start-line on first request
+            if (first_client_request && len >= 4) {
+                char start_line[256] = {0};
+                int i;
+                for (i = 0; i < len && i < 255 && buffer[i] != '\r' && buffer[i] != '\n'; i++) {
+                    start_line[i] = buffer[i];
+                }
+                start_line[i] = '\0';
+                ESP_LOGI(TAG, "Client request: %s", start_line);
+                first_client_request = false;
+            }
+            
             // Check for Connection: close header in client request
             if (len >= 17 && strstr((char*)buffer, "Connection: close")) {
                 keep_alive = false;
@@ -357,6 +370,13 @@ static void handle_client_task(void *pvParameters)
                     ESP_LOGI(TAG, "Powerwall HTTP response: %d (%s)", status_code, status_line);
                 }
             }
+            
+            // Debug mode: show full packet from Powerwall
+            #if DEBUG_MODE
+            ESP_LOGI(TAG, "Powerwall packet (%d bytes):", len);
+            ESP_LOG_BUFFER_HEXDUMP(TAG, buffer, len, ESP_LOG_INFO);
+            ESP_LOGI(TAG, "Powerwall packet (text): %.*s", len, buffer);
+            #endif
             
             // Check for Connection: close header in Powerwall response
             if (len >= 17 && strstr((char*)buffer, "Connection: close")) {

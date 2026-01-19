@@ -27,7 +27,7 @@
 
 // ===== Proxy Server Configuration =====
 #define PROXY_PORT 443
-#define PROXY_TIMEOUT_MS 30000  // 30 seconds
+#define PROXY_TIMEOUT_MS 60000  // 60 seconds (increased from 30)
 #define PROXY_BUFFER_SIZE 2048  // TLS record buffer size
 #define HTTPS_CLIENT_TASK_STACK_SIZE 8192  // Stack size per client task
 
@@ -35,5 +35,9 @@
 #define MDNS_HOSTNAME "powerwall"
 #define MDNS_SERVICE "_powerwall"
 #define MDNS_PROTOCOL "_tcp"
+
+// ===== Debug Configuration =====
+// Enable DEBUG_MODE to show full packet contents from Powerwall and client start-line
+#define DEBUG_MODE 0  // Set to 1 to enable debug logging
 
 #endif // CONFIG_H
