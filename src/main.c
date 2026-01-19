@@ -343,6 +343,7 @@ static void handle_client_task(void *pvParameters)
     }
     int request_len = 0;
     bool request_complete = false;
+    int len = 0;  // For reading data from connections
 
     while (1) {
         // Set read timeout for non-blocking behavior
