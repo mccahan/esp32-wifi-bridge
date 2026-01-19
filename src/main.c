@@ -260,8 +260,12 @@ static void handle_client_task(void *pvParameters)
 
     // Set timeouts on both sockets
     struct timeval timeout = {.tv_sec = PROXY_TIMEOUT_MS / 1000, .tv_usec = (PROXY_TIMEOUT_MS % 1000) * 1000};
-    setsockopt(client_sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
-    setsockopt(powerwall_sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    if (setsockopt(client_sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0) {
+        ESP_LOGW(TAG, "Failed to set timeout on client socket");
+    }
+    if (setsockopt(powerwall_sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0) {
+        ESP_LOGW(TAG, "Failed to set timeout on powerwall socket");
+    }
 
     // Connect to Powerwall
     if (connect(powerwall_sock, (struct sockaddr *)&powerwall_addr, sizeof(powerwall_addr)) != 0) {
@@ -290,92 +294,118 @@ static void handle_client_task(void *pvParameters)
 
     // Set both sockets to non-blocking mode for bidirectional forwarding
     int flags = fcntl(client_sock, F_GETFL, 0);
-    fcntl(client_sock, F_SETFL, flags | O_NONBLOCK);
+    if (flags >= 0) {
+        if (fcntl(client_sock, F_SETFL, flags | O_NONBLOCK) < 0) {
+            ESP_LOGW(TAG, "Failed to set client socket to non-blocking mode");
+        }
+    } else {
+        ESP_LOGW(TAG, "Failed to get client socket flags");
+    }
+    
     flags = fcntl(powerwall_sock, F_GETFL, 0);
-    fcntl(powerwall_sock, F_SETFL, flags | O_NONBLOCK);
+    if (flags >= 0) {
+        if (fcntl(powerwall_sock, F_SETFL, flags | O_NONBLOCK) < 0) {
+            ESP_LOGW(TAG, "Failed to set powerwall socket to non-blocking mode");
+        }
+    } else {
+        ESP_LOGW(TAG, "Failed to get powerwall socket flags");
+    }
 
     TickType_t last_activity = xTaskGetTickCount();
     const TickType_t timeout_ticks = pdMS_TO_TICKS(PROXY_TIMEOUT_MS);
 
-    // Bidirectional forwarding loop (encrypted data passthrough)
+    // Bidirectional forwarding loop using select() for efficient I/O multiplexing
     while (1) {
-        bool activity = false;
+        fd_set read_fds;
+        FD_ZERO(&read_fds);
+        FD_SET(client_sock, &read_fds);
+        FD_SET(powerwall_sock, &read_fds);
+        
+        int max_fd = (client_sock > powerwall_sock) ? client_sock : powerwall_sock;
+        
+        // Use select with a small timeout for activity checking
+        struct timeval select_timeout = {.tv_sec = 0, .tv_usec = 100000}; // 100ms
+        int ready = select(max_fd + 1, &read_fds, NULL, NULL, &select_timeout);
+        
+        if (ready < 0) {
+            ESP_LOGE(TAG, "select() error: %d", errno);
+            break;
+        } else if (ready == 0) {
+            // Timeout - check for inactivity timeout
+            if ((xTaskGetTickCount() - last_activity) > timeout_ticks) {
+                ESP_LOGI(TAG, "Connection timeout - no activity for %d ms", PROXY_TIMEOUT_MS);
+                break;
+            }
+            continue;
+        }
 
         // Client -> Powerwall: Forward encrypted data
-        int len = recv(client_sock, client_buffer, PROXY_BUFFER_SIZE, 0);
-        if (len > 0) {
-            // Forward encrypted data to Powerwall
-            int total_sent = 0;
-            while (total_sent < len) {
-                int sent = send(powerwall_sock, client_buffer + total_sent, len - total_sent, 0);
-                if (sent < 0) {
-                    if (errno != EAGAIN && errno != EWOULDBLOCK) {
-                        ESP_LOGE(TAG, "Error sending to Powerwall: %d", errno);
-                        goto cleanup;
+        if (FD_ISSET(client_sock, &read_fds)) {
+            int len = recv(client_sock, client_buffer, PROXY_BUFFER_SIZE, 0);
+            if (len > 0) {
+                // Forward encrypted data to Powerwall
+                int total_sent = 0;
+                while (total_sent < len) {
+                    int sent = send(powerwall_sock, client_buffer + total_sent, len - total_sent, 0);
+                    if (sent < 0) {
+                        if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                            ESP_LOGE(TAG, "Error sending to Powerwall: %d", errno);
+                            goto cleanup;
+                        }
+                        // Wait briefly and retry
+                        vTaskDelay(pdMS_TO_TICKS(1));
+                    } else {
+                        total_sent += sent;
                     }
-                    vTaskDelay(pdMS_TO_TICKS(1));
-                } else {
-                    total_sent += sent;
                 }
+                last_activity = xTaskGetTickCount();
+                
+                #if DEBUG_MODE
+                ESP_LOGI(TAG, "Forwarded %d bytes from client to Powerwall (encrypted)", len);
+                ESP_LOG_BUFFER_HEXDUMP(TAG, client_buffer, len < 64 ? len : 64, ESP_LOG_INFO);
+                #endif
+            } else if (len == 0) {
+                ESP_LOGI(TAG, "Client closed connection");
+                break;
+            } else {
+                ESP_LOGE(TAG, "Error reading from client: %d", errno);
+                break;
             }
-            activity = true;
-            
-            #if DEBUG_MODE
-            ESP_LOGI(TAG, "Forwarded %d bytes from client to Powerwall (encrypted)", len);
-            ESP_LOG_BUFFER_HEXDUMP(TAG, client_buffer, len < 64 ? len : 64, ESP_LOG_INFO);
-            #endif
-        } else if (len == 0) {
-            ESP_LOGI(TAG, "Client closed connection");
-            break;
-        } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
-            ESP_LOGE(TAG, "Error reading from client: %d", errno);
-            break;
         }
 
         // Powerwall -> Client: Forward encrypted data
-        len = recv(powerwall_sock, powerwall_buffer, PROXY_BUFFER_SIZE, 0);
-        if (len > 0) {
-            // Forward encrypted data to client
-            int total_sent = 0;
-            while (total_sent < len) {
-                int sent = send(client_sock, powerwall_buffer + total_sent, len - total_sent, 0);
-                if (sent < 0) {
-                    if (errno != EAGAIN && errno != EWOULDBLOCK) {
-                        ESP_LOGE(TAG, "Error sending to client: %d", errno);
-                        goto cleanup;
+        if (FD_ISSET(powerwall_sock, &read_fds)) {
+            int len = recv(powerwall_sock, powerwall_buffer, PROXY_BUFFER_SIZE, 0);
+            if (len > 0) {
+                // Forward encrypted data to client
+                int total_sent = 0;
+                while (total_sent < len) {
+                    int sent = send(client_sock, powerwall_buffer + total_sent, len - total_sent, 0);
+                    if (sent < 0) {
+                        if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                            ESP_LOGE(TAG, "Error sending to client: %d", errno);
+                            goto cleanup;
+                        }
+                        // Wait briefly and retry
+                        vTaskDelay(pdMS_TO_TICKS(1));
+                    } else {
+                        total_sent += sent;
                     }
-                    vTaskDelay(pdMS_TO_TICKS(1));
-                } else {
-                    total_sent += sent;
                 }
+                last_activity = xTaskGetTickCount();
+                
+                #if DEBUG_MODE
+                ESP_LOGI(TAG, "Forwarded %d bytes from Powerwall to client (encrypted)", len);
+                ESP_LOG_BUFFER_HEXDUMP(TAG, powerwall_buffer, len < 64 ? len : 64, ESP_LOG_INFO);
+                #endif
+            } else if (len == 0) {
+                ESP_LOGI(TAG, "Powerwall closed connection");
+                break;
+            } else {
+                ESP_LOGE(TAG, "Error reading from Powerwall: %d", errno);
+                break;
             }
-            activity = true;
-            
-            #if DEBUG_MODE
-            ESP_LOGI(TAG, "Forwarded %d bytes from Powerwall to client (encrypted)", len);
-            ESP_LOG_BUFFER_HEXDUMP(TAG, powerwall_buffer, len < 64 ? len : 64, ESP_LOG_INFO);
-            #endif
-        } else if (len == 0) {
-            ESP_LOGI(TAG, "Powerwall closed connection");
-            break;
-        } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
-            ESP_LOGE(TAG, "Error reading from Powerwall: %d", errno);
-            break;
         }
-
-        // Update last activity time if we forwarded any data
-        if (activity) {
-            last_activity = xTaskGetTickCount();
-        }
-
-        // Check timeout
-        if ((xTaskGetTickCount() - last_activity) > timeout_ticks) {
-            ESP_LOGI(TAG, "Connection timeout - no activity for %d ms", PROXY_TIMEOUT_MS);
-            break;
-        }
-
-        // Small delay to prevent tight loop
-        vTaskDelay(pdMS_TO_TICKS(10));
     }
 
 cleanup:
