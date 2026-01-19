@@ -270,6 +270,8 @@ static void handle_client_task(void *pvParameters)
         .skip_common_name = true,
         .non_block = false,
         .timeout_ms = 10000,
+        .crt_bundle_attach = NULL,
+        .use_global_ca_store = false,
     };
 
     // Connect to Powerwall with TLS
