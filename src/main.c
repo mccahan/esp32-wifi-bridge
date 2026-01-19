@@ -268,6 +268,7 @@ static void handle_client_task(void *pvParameters)
     // Client-side TLS configuration (connect to Powerwall, skip verification)
     esp_tls_cfg_t powerwall_cfg = {
         .skip_common_name = true,
+        .non_block = false,
         .timeout_ms = 10000,
     };
 
@@ -281,9 +282,12 @@ static void handle_client_task(void *pvParameters)
         return;
     }
 
-    ret = esp_tls_conn_new_sync(POWERWALL_IP_STR, 0, 443, &powerwall_cfg, powerwall_tls);
+    ret = esp_tls_conn_new_sync(POWERWALL_IP_STR, strlen(POWERWALL_IP_STR), 443, &powerwall_cfg, powerwall_tls);
     if (ret != 1) {
-        ESP_LOGE(TAG, "Failed to connect to Powerwall via TLS");
+        ESP_LOGE(TAG, "Failed to connect to Powerwall via TLS: %d", ret);
+        if (powerwall_tls->error_handle) {
+            ESP_LOGE(TAG, "TLS error: %s", esp_err_to_name(powerwall_tls->error_handle->last_error));
+        }
         esp_tls_conn_destroy(powerwall_tls);
         esp_tls_conn_destroy(client_tls);
         close(client_sock);
