@@ -312,6 +312,7 @@ static void handle_client_task(void *pvParameters)
 
     TickType_t last_activity = xTaskGetTickCount();
     const TickType_t timeout_ticks = pdMS_TO_TICKS(PROXY_TIMEOUT_MS);
+    bool keep_alive = true;  // Track connection keep-alive preference
 
     while (1) {
         // Set read timeout for non-blocking behavior
@@ -320,6 +321,12 @@ static void handle_client_task(void *pvParameters)
         // Client -> Powerwall
         int len = esp_tls_conn_read(client_tls, buffer, PROXY_BUFFER_SIZE);
         if (len > 0) {
+            // Check for Connection: close header in client request
+            if (len >= 17 && strstr((char*)buffer, "Connection: close")) {
+                keep_alive = false;
+                ESP_LOGI(TAG, "Client requested connection close");
+            }
+            
             int written = esp_tls_conn_write(powerwall_tls, buffer, len);
             if (written < 0) {
                 ESP_LOGE(TAG, "Error writing to Powerwall");
@@ -334,6 +341,29 @@ static void handle_client_task(void *pvParameters)
         // Powerwall -> Client  
         len = esp_tls_conn_read(powerwall_tls, buffer, PROXY_BUFFER_SIZE);
         if (len > 0) {
+            // Parse HTTP response status code from Powerwall
+            if (len >= 12 && strncmp((char*)buffer, "HTTP/1.", 7) == 0) {
+                // Extract status code (e.g., "HTTP/1.1 200 OK")
+                char status_line[128] = {0};
+                int i;
+                for (i = 0; i < len && i < 127 && buffer[i] != '\r' && buffer[i] != '\n'; i++) {
+                    status_line[i] = buffer[i];
+                }
+                status_line[i] = '\0';
+                
+                // Parse status code
+                int status_code = 0;
+                if (sscanf(status_line, "HTTP/%*d.%*d %d", &status_code) == 1) {
+                    ESP_LOGI(TAG, "Powerwall HTTP response: %d (%s)", status_code, status_line);
+                }
+            }
+            
+            // Check for Connection: close header in Powerwall response
+            if (len >= 17 && strstr((char*)buffer, "Connection: close")) {
+                keep_alive = false;
+                ESP_LOGI(TAG, "Powerwall requested connection close");
+            }
+            
             int written = esp_tls_conn_write(client_tls, buffer, len);
             if (written < 0) {
                 ESP_LOGE(TAG, "Error writing to client");
@@ -345,9 +375,14 @@ static void handle_client_task(void *pvParameters)
             break;
         }
 
-        // Check timeout
-        if ((xTaskGetTickCount() - last_activity) > timeout_ticks) {
-            ESP_LOGI(TAG, "Connection timeout");
+        // Check timeout (longer timeout for keep-alive connections)
+        TickType_t current_timeout = keep_alive ? timeout_ticks * 3 : timeout_ticks;
+        if ((xTaskGetTickCount() - last_activity) > current_timeout) {
+            if (keep_alive) {
+                ESP_LOGI(TAG, "Keep-alive connection timeout");
+            } else {
+                ESP_LOGI(TAG, "Connection timeout");
+            }
             break;
         }
 
@@ -359,7 +394,12 @@ static void handle_client_task(void *pvParameters)
     esp_tls_conn_destroy(powerwall_tls);
     esp_tls_conn_destroy(client_tls);
     close(client_sock);
-    ESP_LOGI(TAG, "Client connection closed");
+    
+    if (keep_alive) {
+        ESP_LOGI(TAG, "Keep-alive connection closed");
+    } else {
+        ESP_LOGI(TAG, "Client connection closed");
+    }
     vTaskDelete(NULL);
 }
 
