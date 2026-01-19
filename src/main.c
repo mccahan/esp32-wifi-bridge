@@ -344,6 +344,21 @@ static void handle_client_task(void *pvParameters)
     int request_len = 0;
     bool request_complete = false;
     int len = 0;  // For reading data from connections
+    
+    // Response buffering for complete HTTP response reception
+    uint8_t *response_buffer = malloc(PROXY_BUFFER_SIZE * 4);  // Larger buffer for full response
+    if (!response_buffer) {
+        ESP_LOGE(TAG, "Failed to allocate response buffer");
+        free(request_buffer);
+        free(buffer);
+        esp_tls_conn_destroy(powerwall_tls);
+        esp_tls_conn_destroy(client_tls);
+        close(client_sock);
+        vTaskDelete(NULL);
+        return;
+    }
+    int response_len = 0;
+    bool response_complete = false;
 
     while (1) {
         // Set read timeout for non-blocking behavior
@@ -443,16 +458,75 @@ static void handle_client_task(void *pvParameters)
             last_activity = xTaskGetTickCount();
         }
 
-        // Powerwall -> Client  
-        len = esp_tls_conn_read(powerwall_tls, buffer, PROXY_BUFFER_SIZE);
-        if (len > 0) {
+        // Powerwall -> Client: Read complete response before forwarding
+        if (!response_complete) {
+            len = esp_tls_conn_read(powerwall_tls, buffer, PROXY_BUFFER_SIZE);
+            if (len > 0) {
+                // Append to response buffer
+                if (response_len + len < PROXY_BUFFER_SIZE * 4) {
+                    memcpy(response_buffer + response_len, buffer, len);
+                    response_len += len;
+                    
+                    // Check if we have complete HTTP response
+                    if (response_len >= 4) {
+                        char *headers_end = strstr((char*)response_buffer, "\r\n\r\n");
+                        if (headers_end) {
+                            int headers_len = headers_end - (char*)response_buffer + 4;
+                            
+                            // Parse Content-Length from response headers
+                            char *content_length_str = stristr((char*)response_buffer, "\r\nContent-Length:");
+                            int content_length = 0;
+                            if (content_length_str && content_length_str < headers_end) {
+                                sscanf(content_length_str, "\r\nContent-Length: %d", &content_length);
+                            }
+                            
+                            // Check for chunked encoding
+                            char *transfer_encoding = stristr((char*)response_buffer, "\r\nTransfer-Encoding:");
+                            bool is_chunked = false;
+                            if (transfer_encoding && transfer_encoding < headers_end) {
+                                if (stristr(transfer_encoding, "chunked")) {
+                                    is_chunked = true;
+                                }
+                            }
+                            
+                            // Response is complete if:
+                            // 1. We have Content-Length and all body data
+                            // 2. Or it's chunked and we received final chunk (0\r\n\r\n)
+                            // 3. Or no body expected (Content-Length: 0 or no Content-Length with no chunked)
+                            if (content_length > 0 && response_len >= headers_len + content_length) {
+                                response_complete = true;
+                            } else if (is_chunked && response_len >= headers_len + 5) {
+                                // Look for chunked terminator: 0\r\n\r\n
+                                if (strstr((char*)response_buffer + headers_len, "\r\n0\r\n\r\n") ||
+                                    strstr((char*)response_buffer + headers_len, "0\r\n\r\n")) {
+                                    response_complete = true;
+                                }
+                            } else if (content_length == 0 && !is_chunked) {
+                                // No body expected
+                                response_complete = true;
+                            }
+                        }
+                    }
+                } else {
+                    ESP_LOGE(TAG, "Response too large, buffer overflow");
+                    break;
+                }
+                last_activity = xTaskGetTickCount();
+            } else if (len < 0 && len != ESP_TLS_ERR_SSL_WANT_READ && len != ESP_TLS_ERR_SSL_WANT_WRITE) {
+                ESP_LOGI(TAG, "Powerwall connection closed or error: %d", len);
+                break;
+            }
+        }
+        
+        // Once we have complete response, process and forward it
+        if (response_complete) {
             // Parse HTTP response status code from Powerwall
-            if (len >= 12 && strncmp((char*)buffer, "HTTP/1.", 7) == 0) {
+            if (response_len >= 12 && strncmp((char*)response_buffer, "HTTP/1.", 7) == 0) {
                 // Extract status code (e.g., "HTTP/1.1 200 OK")
                 char status_line[128] = {0};
                 int i;
-                for (i = 0; i < len && i < 127 && buffer[i] != '\r' && buffer[i] != '\n'; i++) {
-                    status_line[i] = buffer[i];
+                for (i = 0; i < response_len && i < 127 && response_buffer[i] != '\r' && response_buffer[i] != '\n'; i++) {
+                    status_line[i] = response_buffer[i];
                 }
                 status_line[i] = '\0';
                 
@@ -463,28 +537,38 @@ static void handle_client_task(void *pvParameters)
                 }
             }
             
-            // Debug mode: show full packet from Powerwall
+            // Debug mode: show full response from Powerwall
             #if DEBUG_MODE
-            ESP_LOGI(TAG, "Powerwall packet (%d bytes):", len);
-            ESP_LOG_BUFFER_HEXDUMP(TAG, buffer, len, ESP_LOG_INFO);
-            ESP_LOGI(TAG, "Powerwall packet (text): %.*s", len, buffer);
+            ESP_LOGI(TAG, "Powerwall response (%d bytes):", response_len);
+            ESP_LOG_BUFFER_HEXDUMP(TAG, response_buffer, response_len, ESP_LOG_INFO);
+            ESP_LOGI(TAG, "Powerwall response (text): %.*s", response_len, response_buffer);
             #endif
             
             // Check for Connection: close header in Powerwall response
-            if (len >= 17 && strstr((char*)buffer, "Connection: close")) {
+            if (stristr((char*)response_buffer, "\r\nConnection: close")) {
                 keep_alive = false;
                 ESP_LOGI(TAG, "Powerwall requested connection close");
             }
             
-            int written = esp_tls_conn_write(client_tls, buffer, len);
-            if (written < 0) {
-                ESP_LOGE(TAG, "Error writing to client");
+            // Send complete response to client
+            int total_written = 0;
+            while (total_written < response_len) {
+                int written = esp_tls_conn_write(client_tls, response_buffer + total_written, response_len - total_written);
+                if (written < 0) {
+                    ESP_LOGE(TAG, "Failed to write to client: %d", written);
+                    break;
+                }
+                total_written += written;
+            }
+            
+            if (total_written < response_len) {
                 break;
             }
+            
+            // Reset for next response
+            response_len = 0;
+            response_complete = false;
             last_activity = xTaskGetTickCount();
-        } else if (len < 0 && len != ESP_TLS_ERR_SSL_WANT_READ && len != ESP_TLS_ERR_SSL_WANT_WRITE) {
-            ESP_LOGI(TAG, "Powerwall connection closed or error: %d", len);
-            break;
         }
 
         // Check timeout (longer timeout for keep-alive connections)
@@ -504,6 +588,7 @@ static void handle_client_task(void *pvParameters)
 
     free(buffer);
     free(request_buffer);
+    free(response_buffer);
     esp_tls_conn_destroy(powerwall_tls);
     esp_tls_conn_destroy(client_tls);
     close(client_sock);
