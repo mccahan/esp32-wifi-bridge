@@ -27,6 +27,7 @@ This project uses the ESP32-S3-POE-ETH board (Waveshare) with **ESP-IDF framewor
 - **WiFi Client**: Connects to Tesla Powerwall AP (192.168.91.1)
 - **TLS Termination Proxy**: Decrypts HTTPS on Ethernet side using self-signed certificate
 - **HTTPS Client**: Re-encrypts and forwards to Powerwall with proper hostname handling
+- **Hardware SSL Acceleration**: Uses ESP32-S3 hardware crypto accelerators (AES, SHA, RSA/ECC) for improved TLS performance
 - **DHCP**: Both WiFi and Ethernet interfaces use DHCP
 - **mDNS**: Advertises "_powerwall" service on Ethernet interface
 - **Bidirectional**: Handles decrypted HTTP traffic in both directions with 2KB buffers
@@ -49,6 +50,28 @@ This implementation provides **TLS termination with HTTP proxying**:
 - **WiFi Side**: esp_tls client to Powerwall (skips cert verification)
 
 The ESP32-S3 acts as a man-in-the-middle HTTPS proxy, allowing inspection and modification of HTTP traffic while maintaining separate TLS sessions on both sides. This is required because the Powerwall server validates the hostname in the request.
+
+## Hardware Acceleration
+
+The ESP32-S3 includes dedicated hardware accelerators for cryptographic operations, significantly improving TLS/SSL performance and reducing CPU load:
+
+- **AES Hardware Acceleration**: Hardware-accelerated AES encryption/decryption using the ESP32-S3's AES peripheral with interrupt-driven operation
+- **SHA Hardware Acceleration**: Hardware-accelerated SHA-1, SHA-256, SHA-384, and SHA-512 hashing operations
+- **RSA/ECC Hardware Acceleration**: Hardware-accelerated RSA and ECC operations via the MPI (Multiple Precision Integer) peripheral
+
+These accelerators are automatically used by mbedTLS (the TLS library underlying esp_tls) and provide:
+- Faster TLS handshakes (RSA/ECC operations)
+- Improved symmetric encryption performance (AES for bulk data transfer)
+- Reduced CPU usage, allowing more resources for application logic
+- Lower power consumption compared to software-only crypto
+
+The hardware acceleration is configured in `sdkconfig.defaults`:
+```
+CONFIG_MBEDTLS_HARDWARE_AES=y
+CONFIG_MBEDTLS_AES_USE_INTERRUPT=y
+CONFIG_MBEDTLS_HARDWARE_MPI=y
+CONFIG_MBEDTLS_HARDWARE_SHA=y
+```
 
 ## Configuration
 
