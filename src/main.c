@@ -285,8 +285,10 @@ static void handle_client_task(void *pvParameters)
     ret = esp_tls_conn_new_sync(POWERWALL_IP_STR, strlen(POWERWALL_IP_STR), 443, &powerwall_cfg, powerwall_tls);
     if (ret != 1) {
         ESP_LOGE(TAG, "Failed to connect to Powerwall via TLS: %d", ret);
-        if (powerwall_tls->error_handle) {
-            ESP_LOGE(TAG, "TLS error: %s", esp_err_to_name(powerwall_tls->error_handle->last_error));
+        int esp_tls_code = 0, esp_tls_flags = 0;
+        esp_err_t esp_tls_err = esp_tls_get_and_clear_last_error(powerwall_tls->error_handle, &esp_tls_code, &esp_tls_flags);
+        if (esp_tls_err != ESP_OK) {
+            ESP_LOGE(TAG, "TLS error code: 0x%x, flags: 0x%x", esp_tls_code, esp_tls_flags);
         }
         esp_tls_conn_destroy(powerwall_tls);
         esp_tls_conn_destroy(client_tls);
