@@ -267,11 +267,8 @@ static void handle_client_task(void *pvParameters)
 
     // Client-side TLS configuration (connect to Powerwall, skip verification)
     // Provide empty CA cert to satisfy esp_tls verification requirement while skipping actual verification
-    static const char *dummy_ca = "";
     esp_tls_cfg_t powerwall_cfg = {
-        .cacert_buf = (const unsigned char *)dummy_ca,
-        .cacert_bytes = 1,
-        .skip_common_name = true,
+        .skip_cert_verify = true,
         .non_block = false,
         .timeout_ms = 10000,
     };
