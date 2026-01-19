@@ -227,6 +227,45 @@ static void init_mdns(void)
     ESP_LOGI(TAG, "mDNS service added: %s.%s on port %d", MDNS_SERVICE, MDNS_PROTOCOL, PROXY_PORT);
 }
 
+/** WiFi quality monitoring task - periodically logs connection quality */
+static void wifi_quality_monitor_task(void *pvParameters)
+{
+    ESP_LOGI(TAG, "WiFi quality monitoring started (interval: %d seconds)", WIFI_QUALITY_LOG_INTERVAL_SEC);
+    
+    while (1) {
+        // Wait for the configured interval
+        vTaskDelay(pdMS_TO_TICKS(WIFI_QUALITY_LOG_INTERVAL_SEC * 1000));
+        
+        // Check if WiFi is connected
+        EventBits_t bits = xEventGroupGetBits(s_event_group);
+        if (bits & WIFI_CONNECTED_BIT) {
+            wifi_ap_record_t ap_info;
+            esp_err_t err = esp_wifi_sta_get_ap_info(&ap_info);
+            
+            if (err == ESP_OK) {
+                // Log WiFi connection quality metrics
+                ESP_LOGI(TAG, "WiFi Quality - RSSI: %d dBm, Channel: %d, Auth: %d", 
+                         ap_info.rssi, ap_info.primary, ap_info.authmode);
+                
+                // Provide quality interpretation
+                if (ap_info.rssi > -50) {
+                    ESP_LOGI(TAG, "WiFi Signal: Excellent");
+                } else if (ap_info.rssi > -60) {
+                    ESP_LOGI(TAG, "WiFi Signal: Good");
+                } else if (ap_info.rssi > -70) {
+                    ESP_LOGI(TAG, "WiFi Signal: Fair");
+                } else {
+                    ESP_LOGW(TAG, "WiFi Signal: Weak");
+                }
+            } else {
+                ESP_LOGW(TAG, "Failed to get WiFi AP info: %d", err);
+            }
+        } else {
+            ESP_LOGW(TAG, "WiFi not connected - skipping quality check");
+        }
+    }
+}
+
 /** SSL/TLS Passthrough Proxy task - forwards encrypted packets without decryption */
 static void handle_client_task(void *pvParameters)
 {
@@ -550,6 +589,9 @@ void app_main(void)
 
     // Initialize mDNS
     init_mdns();
+
+    // Start WiFi quality monitoring task
+    xTaskCreate(wifi_quality_monitor_task, "wifi_monitor", 2048, NULL, 3, NULL);
 
     // Start TCP server task
     xTaskCreate(tcp_server_task, "tcp_server", 4096, NULL, 5, NULL);

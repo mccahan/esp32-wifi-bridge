@@ -42,6 +42,10 @@
 #define MDNS_SERVICE "_powerwall"
 #define MDNS_PROTOCOL "_tcp"
 
+// ===== WiFi Quality Monitoring =====
+// Interval for logging WiFi connection quality (in seconds)
+#define WIFI_QUALITY_LOG_INTERVAL_SEC 30  // Log every 30 seconds
+
 // ===== Debug Configuration =====
 // Enable DEBUG_MODE to show encrypted packet forwarding details
 #define DEBUG_MODE 0  // Set to 1 to enable debug logging
