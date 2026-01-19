@@ -261,10 +261,10 @@ static void handle_client_task(void *pvParameters)
     // Set timeouts on both sockets
     struct timeval timeout = {.tv_sec = PROXY_TIMEOUT_MS / 1000, .tv_usec = (PROXY_TIMEOUT_MS % 1000) * 1000};
     if (setsockopt(client_sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0) {
-        ESP_LOGW(TAG, "Failed to set timeout on client socket");
+        ESP_LOGW(TAG, "Failed to set timeout on client socket: %d", errno);
     }
     if (setsockopt(powerwall_sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0) {
-        ESP_LOGW(TAG, "Failed to set timeout on powerwall socket");
+        ESP_LOGW(TAG, "Failed to set timeout on powerwall socket: %d", errno);
     }
 
     // Connect to Powerwall
@@ -296,19 +296,19 @@ static void handle_client_task(void *pvParameters)
     int flags = fcntl(client_sock, F_GETFL, 0);
     if (flags >= 0) {
         if (fcntl(client_sock, F_SETFL, flags | O_NONBLOCK) < 0) {
-            ESP_LOGW(TAG, "Failed to set client socket to non-blocking mode");
+            ESP_LOGW(TAG, "Failed to set client socket to non-blocking mode: %d", errno);
         }
     } else {
-        ESP_LOGW(TAG, "Failed to get client socket flags");
+        ESP_LOGW(TAG, "Failed to get client socket flags: %d", errno);
     }
     
     flags = fcntl(powerwall_sock, F_GETFL, 0);
     if (flags >= 0) {
         if (fcntl(powerwall_sock, F_SETFL, flags | O_NONBLOCK) < 0) {
-            ESP_LOGW(TAG, "Failed to set powerwall socket to non-blocking mode");
+            ESP_LOGW(TAG, "Failed to set powerwall socket to non-blocking mode: %d", errno);
         }
     } else {
-        ESP_LOGW(TAG, "Failed to get powerwall socket flags");
+        ESP_LOGW(TAG, "Failed to get powerwall socket flags: %d", errno);
     }
 
     TickType_t last_activity = xTaskGetTickCount();
@@ -343,9 +343,12 @@ static void handle_client_task(void *pvParameters)
         if (FD_ISSET(client_sock, &read_fds)) {
             int len = recv(client_sock, client_buffer, PROXY_BUFFER_SIZE, 0);
             if (len > 0) {
-                // Forward encrypted data to Powerwall
+                // Forward encrypted data to Powerwall with retry limit
                 int total_sent = 0;
-                while (total_sent < len) {
+                int retry_count = 0;
+                const int max_retries = 100; // Prevent infinite retry loop
+                
+                while (total_sent < len && retry_count < max_retries) {
                     int sent = send(powerwall_sock, client_buffer + total_sent, len - total_sent, 0);
                     if (sent < 0) {
                         if (errno != EAGAIN && errno != EWOULDBLOCK) {
@@ -353,11 +356,19 @@ static void handle_client_task(void *pvParameters)
                             goto cleanup;
                         }
                         // Wait briefly and retry
+                        retry_count++;
                         vTaskDelay(pdMS_TO_TICKS(1));
                     } else {
                         total_sent += sent;
+                        retry_count = 0; // Reset retry count on successful send
                     }
                 }
+                
+                if (total_sent < len) {
+                    ESP_LOGE(TAG, "Failed to send all data to Powerwall after %d retries", max_retries);
+                    goto cleanup;
+                }
+                
                 last_activity = xTaskGetTickCount();
                 
                 #if DEBUG_MODE
@@ -377,9 +388,12 @@ static void handle_client_task(void *pvParameters)
         if (FD_ISSET(powerwall_sock, &read_fds)) {
             int len = recv(powerwall_sock, powerwall_buffer, PROXY_BUFFER_SIZE, 0);
             if (len > 0) {
-                // Forward encrypted data to client
+                // Forward encrypted data to client with retry limit
                 int total_sent = 0;
-                while (total_sent < len) {
+                int retry_count = 0;
+                const int max_retries = 100; // Prevent infinite retry loop
+                
+                while (total_sent < len && retry_count < max_retries) {
                     int sent = send(client_sock, powerwall_buffer + total_sent, len - total_sent, 0);
                     if (sent < 0) {
                         if (errno != EAGAIN && errno != EWOULDBLOCK) {
@@ -387,11 +401,19 @@ static void handle_client_task(void *pvParameters)
                             goto cleanup;
                         }
                         // Wait briefly and retry
+                        retry_count++;
                         vTaskDelay(pdMS_TO_TICKS(1));
                     } else {
                         total_sent += sent;
+                        retry_count = 0; // Reset retry count on successful send
                     }
                 }
+                
+                if (total_sent < len) {
+                    ESP_LOGE(TAG, "Failed to send all data to client after %d retries", max_retries);
+                    goto cleanup;
+                }
+                
                 last_activity = xTaskGetTickCount();
                 
                 #if DEBUG_MODE
