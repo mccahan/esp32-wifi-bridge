@@ -266,6 +266,70 @@ static void wifi_quality_monitor_task(void *pvParameters)
     }
 }
 
+/** System monitoring task - periodically logs CPU load and system metrics */
+static void system_monitor_task(void *pvParameters)
+{
+    ESP_LOGI(TAG, "System monitoring started (interval: %d seconds)", SYSTEM_MONITOR_INTERVAL_SEC);
+    
+    // Variables for CPU load calculation
+    uint32_t idle_time_start = 0;
+    uint32_t total_time_start = 0;
+    
+    while (1) {
+        // Wait for the configured interval
+        vTaskDelay(pdMS_TO_TICKS(SYSTEM_MONITOR_INTERVAL_SEC * 1000));
+        
+        // Get runtime statistics for CPU load calculation
+        TaskStatus_t *task_array;
+        UBaseType_t task_count;
+        uint32_t total_runtime;
+        uint32_t idle_runtime = 0;
+        
+        // Get number of tasks
+        task_count = uxTaskGetNumberOfTasks();
+        
+        // Allocate array for task status
+        task_array = pvPortMalloc(task_count * sizeof(TaskStatus_t));
+        
+        if (task_array != NULL) {
+            // Get task statistics
+            task_count = uxTaskGetSystemState(task_array, task_count, &total_runtime);
+            
+            // Find IDLE task runtime (there's one per core on ESP32)
+            for (UBaseType_t i = 0; i < task_count; i++) {
+                if (strstr(task_array[i].pcTaskName, "IDLE") != NULL) {
+                    idle_runtime += task_array[i].ulRunTimeCounter;
+                }
+            }
+            
+            // Calculate CPU load percentage
+            if (total_time_start > 0) {
+                uint32_t total_time_diff = total_runtime - total_time_start;
+                uint32_t idle_time_diff = idle_runtime - idle_time_start;
+                
+                if (total_time_diff > 0) {
+                    uint32_t cpu_load = 100 - ((idle_time_diff * 100) / total_time_diff);
+                    ESP_LOGI(TAG, "System Status - CPU Load: %lu%%, Free Heap: %lu bytes", 
+                             (unsigned long)cpu_load, 
+                             (unsigned long)esp_get_free_heap_size());
+                }
+            }
+            
+            // Store current values for next iteration
+            idle_time_start = idle_runtime;
+            total_time_start = total_runtime;
+            
+            // Free allocated memory
+            vPortFree(task_array);
+        } else {
+            ESP_LOGW(TAG, "Failed to allocate memory for task statistics");
+            // Still log free heap even if we can't get CPU stats
+            ESP_LOGI(TAG, "System Status - Free Heap: %lu bytes", 
+                     (unsigned long)esp_get_free_heap_size());
+        }
+    }
+}
+
 /** SSL/TLS Passthrough Proxy task - forwards encrypted packets without decryption */
 static void handle_client_task(void *pvParameters)
 {
@@ -592,6 +656,9 @@ void app_main(void)
 
     // Start WiFi quality monitoring task (increased stack size for logging)
     xTaskCreate(wifi_quality_monitor_task, "wifi_monitor", 3072, NULL, 3, NULL);
+
+    // Start system monitoring task (CPU load, memory)
+    xTaskCreate(system_monitor_task, "sys_monitor", 3072, NULL, 3, NULL);
 
     // Start TCP server task
     xTaskCreate(tcp_server_task, "tcp_server", 4096, NULL, 5, NULL);
