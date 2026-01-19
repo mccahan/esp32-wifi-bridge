@@ -28,8 +28,14 @@
 // ===== Proxy Server Configuration =====
 #define PROXY_PORT 443
 #define PROXY_TIMEOUT_MS 60000  // 60 seconds (increased from 30)
-#define PROXY_BUFFER_SIZE 2048  // TLS record buffer size
-#define HTTPS_CLIENT_TASK_STACK_SIZE 8192  // Stack size per client task
+#define PROXY_BUFFER_SIZE 2048  // Buffer size for forwarding encrypted data
+#define SSL_PASSTHROUGH_TASK_STACK_SIZE 6144  // Stack size per client task (reduced from 8192)
+
+// ===== TTL Configuration =====
+// TTL (Time-To-Live) value to set on outgoing packets to hide external origin
+// Common TTL values: 64 (Linux/Unix default), 128 (Windows default), 255 (Cisco default)
+// Setting to 64 as it's the most common default for web servers
+#define TTL_VALUE 64
 
 // ===== mDNS Configuration =====
 #define MDNS_HOSTNAME "powerwall"
@@ -37,7 +43,7 @@
 #define MDNS_PROTOCOL "_tcp"
 
 // ===== Debug Configuration =====
-// Enable DEBUG_MODE to show full packet contents from Powerwall and client start-line
+// Enable DEBUG_MODE to show encrypted packet forwarding details
 #define DEBUG_MODE 0  // Set to 1 to enable debug logging
 
 #endif // CONFIG_H

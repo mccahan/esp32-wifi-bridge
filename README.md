@@ -1,10 +1,10 @@
-# ESP32-S3-POE-ETH WiFi-Ethernet HTTPS Proxy
+# ESP32-S3-POE-ETH WiFi-Ethernet SSL Bridge
 
-This project uses the ESP32-S3-POE-ETH board (Waveshare) with **ESP-IDF framework** to create a WiFi-Ethernet HTTPS proxy with TLS termination that:
-- Accepts HTTPS connections on Ethernet (port 443) with self-signed certificate
-- Decrypts incoming TLS traffic using esp_tls (high-level mbedTLS wrapper)
-- Re-encrypts and forwards HTTP traffic to Tesla Powerwall at 192.168.91.1 over WiFi
-- Handles SNI/hostname requirements of the Powerwall server
+This project uses the ESP32-S3-POE-ETH board (Waveshare) with **ESP-IDF framework** to create a WiFi-Ethernet SSL bridge that:
+- Accepts SSL/TLS connections on Ethernet (port 443)
+- **Forwards encrypted traffic without decryption** (SSL passthrough)
+- Modifies TTL (Time-To-Live) to hide that traffic originates from outside the network
+- Forwards to Tesla Powerwall at 192.168.91.1 over WiFi
 
 ## Hardware
 
@@ -25,30 +25,29 @@ This project uses the ESP32-S3-POE-ETH board (Waveshare) with **ESP-IDF framewor
 ## Features
 
 - **WiFi Client**: Connects to Tesla Powerwall AP (192.168.91.1)
-- **TLS Termination Proxy**: Decrypts HTTPS on Ethernet side using self-signed certificate
-- **HTTPS Client**: Re-encrypts and forwards to Powerwall with proper hostname handling
+- **SSL Passthrough**: Forwards encrypted SSL/TLS traffic without decryption
+- **TTL Modification**: Modifies Time-To-Live on outgoing packets to hide external origin
 - **DHCP**: Both WiFi and Ethernet interfaces use DHCP
 - **mDNS**: Advertises "_powerwall" service on Ethernet interface
-- **Bidirectional**: Handles decrypted HTTP traffic in both directions with 2KB buffers
-- **Memory Optimized**: Uses esp_tls with dynamic buffers and asymmetric content lengths
+- **Bidirectional**: Handles encrypted traffic in both directions with 2KB buffers
+- **Memory Optimized**: Simple TCP socket forwarding without TLS overhead
 
 ## Architecture
 
 ```
-[Ethernet Client] <=HTTPS (TLS)=> [ESP32-S3 Proxy] <=HTTPS (TLS)=> [Powerwall WiFi]
-                                  decrypt | re-encrypt
-                                     HTTP proxy
+[Ethernet Client] <=SSL/TLS (Encrypted)=> [ESP32-S3 Bridge] <=SSL/TLS (Encrypted)=> [Powerwall WiFi]
+                                           TCP passthrough
+                                           TTL modification
 ```
 
-This implementation provides **TLS termination with HTTP proxying**:
-- **TLS Termination**: Decrypts client HTTPS using self-signed certificate
-- **HTTP Proxy**: Forwards decrypted HTTP requests
-- **Re-encryption**: Establishes separate TLS connection to Powerwall
-- **Hostname Handling**: Properly handles SNI requirements for Powerwall server
-- **Ethernet Side**: esp_tls server with self-signed cert (cert.h)
-- **WiFi Side**: esp_tls client to Powerwall (skips cert verification)
+This implementation provides **SSL passthrough with TTL modification**:
+- **No TLS Termination**: Traffic remains encrypted end-to-end
+- **TCP Forwarding**: Simple socket-to-socket forwarding of encrypted data
+- **TTL Modification**: Sets TTL=64 on outgoing packets to appear as local traffic
+- **Transparent Bridge**: Client connects directly to Powerwall through the bridge
+- **Lower Overhead**: No encryption/decryption overhead on the ESP32-S3
 
-The ESP32-S3 acts as a man-in-the-middle HTTPS proxy, allowing inspection and modification of HTTP traffic while maintaining separate TLS sessions on both sides. This is required because the Powerwall server validates the hostname in the request.
+The ESP32-S3 acts as a transparent SSL bridge, forwarding encrypted traffic while modifying the TTL field to make the traffic appear to originate from within the local network.
 
 ## Configuration
 
@@ -74,7 +73,8 @@ Edit `include/config.h` to customize:
 
 // Proxy Settings
 #define PROXY_PORT 443
-#define PROXY_TIMEOUT_MS 30000
+#define PROXY_TIMEOUT_MS 60000
+#define TTL_VALUE 64  // TTL to hide external origin
 
 // mDNS Settings
 #define MDNS_HOSTNAME "powerwall"
@@ -128,7 +128,7 @@ idf.py monitor
 2. Ethernet interface obtains IP via DHCP
 3. TCP server starts on port 443 on Ethernet interface
 4. mDNS service advertises as "powerwall.local" with "_powerwall._tcp" service
-5. All HTTPS requests to Ethernet interface are proxied to 192.168.91.1 over WiFi
+5. All SSL/TLS connections to Ethernet interface are forwarded to 192.168.91.1 over WiFi with TTL modification
 
 ## mDNS Discovery
 
@@ -140,7 +140,8 @@ The service can be discovered on the local network as:
 ## Serial Output Example
 
 ```
-I (328) wifi-eth-bridge: === ESP32-S3-POE-ETH WiFi-Ethernet HTTPS Proxy ===
+I (328) wifi-eth-bridge: === ESP32-S3-POE-ETH WiFi-Ethernet SSL Bridge ===
+I (333) wifi-eth-bridge: Mode: SSL Passthrough (no decryption, TTL modification)
 I (338) wifi-eth-bridge: Target: Tesla Powerwall at 192.168.91.1:443
 I (348) wifi-eth-bridge: Initializing Ethernet W5500...
 I (358) wifi-eth-bridge: Ethernet initialized - waiting for connection...
@@ -153,8 +154,8 @@ I (3268) wifi-eth-bridge: Ethernet Got IP Address
 I (3268) wifi-eth-bridge: ETHIP:192.168.1.100
 I (3268) wifi-eth-bridge: mDNS hostname set to: powerwall
 I (3278) wifi-eth-bridge: mDNS service added: _powerwall._tcp on port 443
-I (3288) wifi-eth-bridge: TCP Server listening on port 443
-I (3298) wifi-eth-bridge: Ready to proxy traffic from Ethernet to WiFi (192.168.91.1:443)
+I (3288) wifi-eth-bridge: TCP Server (SSL passthrough) listening on port 443
+I (3298) wifi-eth-bridge: Ready to forward encrypted SSL/TLS traffic to Powerwall (192.168.91.1:443) with TTL modification
 ```
 
 ## Migration from Arduino
@@ -171,8 +172,7 @@ This project was migrated from Arduino framework to ESP-IDF to resolve W5500 lib
 ## Files
 
 - `src/main.c` - Main application code (ESP-IDF)
-- `include/config.h` - Configuration settings
-- `include/cert.h` - Self-signed certificate (for reference)
+- `include/config.h` - Configuration settings including TTL value
 - `platformio.ini` - PlatformIO configuration (ESP-IDF framework)
 - `CMakeLists.txt` - ESP-IDF build configuration
 - `sdkconfig.defaults` - ESP-IDF default configuration

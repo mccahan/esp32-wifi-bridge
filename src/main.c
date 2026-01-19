@@ -2,11 +2,13 @@
  * ESP32-S3 W5500 Ethernet WiFi Bridge (ESP-IDF)
  * 
  * This implementation uses ESP-IDF native esp_eth driver with W5500 over SPI.
- * Implements HTTPS proxy with TLS termination using esp_tls (high-level mbedTLS wrapper).
- * The proxy decrypts HTTPS traffic from Ethernet clients and re-encrypts it to the Powerwall.
+ * Implements SSL/TLS passthrough proxy without decryption.
+ * The proxy forwards encrypted traffic from Ethernet to WiFi and modifies TTL to hide external origin.
  */
 
 #include <string.h>
+#include <errno.h>
+#include <fcntl.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
@@ -16,8 +18,6 @@
 #include "esp_log.h"
 #include "esp_eth.h"
 #include "esp_netif.h"
-#include "esp_tls.h"
-#include "esp_crt_bundle.h"
 #include "nvs_flash.h"
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
@@ -28,8 +28,6 @@
 #include "lwip/netdb.h"
 
 #include "config.h"
-#include "cert.h"
-#include "certs.h"
 
 static const char *TAG = "wifi-eth-bridge";
 
@@ -229,356 +227,150 @@ static void init_mdns(void)
     ESP_LOGI(TAG, "mDNS service added: %s.%s on port %d", MDNS_SERVICE, MDNS_PROTOCOL, PROXY_PORT);
 }
 
-/** Case-insensitive string search helper */
-static char* stristr(const char* haystack, const char* needle) {
-    if (!haystack || !needle) return NULL;
-    
-    size_t needle_len = strlen(needle);
-    if (needle_len == 0) return (char*)haystack;
-    
-    for (; *haystack; haystack++) {
-        if (strncasecmp(haystack, needle, needle_len) == 0) {
-            return (char*)haystack;
-        }
-    }
-    return NULL;
-}
-
-/** HTTPS Proxy task with TLS termination - handles decrypt/re-encrypt */
+/** SSL/TLS Passthrough Proxy task - forwards encrypted packets without decryption */
 static void handle_client_task(void *pvParameters)
 {
     int client_sock = (int)pvParameters;
-    char addr_str[32] = "unknown";
     
-    ESP_LOGI(TAG, "Handling client connection");
+    ESP_LOGI(TAG, "Handling client connection (SSL passthrough mode)");
 
-    // Server-side TLS configuration (accept connections with self-signed cert)
-    esp_tls_cfg_server_t server_cfg = {
-        .servercert_buf = (const unsigned char *)server_cert_pem,
-        .servercert_bytes = sizeof(server_cert_pem),
-        .serverkey_buf = (const unsigned char *)server_key_pem,
-        .serverkey_bytes = sizeof(server_key_pem),
-    };
+    // Connect to Powerwall via TCP (no TLS, just raw socket)
+    struct sockaddr_in powerwall_addr;
+    powerwall_addr.sin_family = AF_INET;
+    powerwall_addr.sin_port = htons(443);
+    inet_pton(AF_INET, POWERWALL_IP_STR, &powerwall_addr.sin_addr);
 
-    // Create TLS connection for client (server role)
-    esp_tls_t *client_tls = esp_tls_init();
-    if (!client_tls) {
-        ESP_LOGE(TAG, "Failed to allocate esp_tls for client");
+    int powerwall_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
+    if (powerwall_sock < 0) {
+        ESP_LOGE(TAG, "Failed to create socket to Powerwall");
         close(client_sock);
         vTaskDelete(NULL);
         return;
     }
 
-    int ret = esp_tls_server_session_create(&server_cfg, client_sock, client_tls);
-    if (ret != 0) {
-        ESP_LOGE(TAG, "TLS handshake with client failed: %d", ret);
-        esp_tls_conn_destroy(client_tls);
+    // Set TTL to hide that traffic is coming from outside the network
+    // Common TTL values: 64 (Linux/Unix), 128 (Windows), 255 (Cisco)
+    // Using 64 as it's the most common default
+    int ttl = TTL_VALUE;
+    if (setsockopt(powerwall_sock, IPPROTO_IP, IP_TTL, &ttl, sizeof(ttl)) < 0) {
+        ESP_LOGW(TAG, "Failed to set TTL on socket: %d", errno);
+    } else {
+        ESP_LOGI(TAG, "Set TTL to %d on outgoing connection", ttl);
+    }
+
+    // Set timeouts on both sockets
+    struct timeval timeout = {.tv_sec = PROXY_TIMEOUT_MS / 1000, .tv_usec = (PROXY_TIMEOUT_MS % 1000) * 1000};
+    setsockopt(client_sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    setsockopt(powerwall_sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+
+    // Connect to Powerwall
+    if (connect(powerwall_sock, (struct sockaddr *)&powerwall_addr, sizeof(powerwall_addr)) != 0) {
+        ESP_LOGE(TAG, "Failed to connect to Powerwall at %s:443 - error: %d", POWERWALL_IP_STR, errno);
+        close(powerwall_sock);
         close(client_sock);
         vTaskDelete(NULL);
         return;
     }
 
-    ESP_LOGI(TAG, "TLS handshake with client successful");
+    ESP_LOGI(TAG, "Connected to Powerwall at %s:443 (encrypted passthrough)", POWERWALL_IP_STR);
 
-    // Client-side TLS configuration (connect to Powerwall, skip verification)
-    // Skip certificate verification entirely for self-signed Powerwall cert
-    // With CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY=y, we can use skip_cert_verify field
-    esp_tls_cfg_t powerwall_cfg = {
-        .skip_common_name = true,
-        .use_global_ca_store = false,
-        .crt_bundle_attach = NULL,
-        .non_block = false,
-        .timeout_ms = 10000,
-        .if_name = NULL,
-    };
-
-    // Connect to Powerwall with TLS
-    esp_tls_t *powerwall_tls = esp_tls_init();
-    if (!powerwall_tls) {
-        ESP_LOGE(TAG, "Failed to allocate esp_tls for Powerwall");
-        esp_tls_conn_destroy(client_tls);
+    // Allocate buffers for bidirectional forwarding
+    uint8_t *client_buffer = malloc(PROXY_BUFFER_SIZE);
+    uint8_t *powerwall_buffer = malloc(PROXY_BUFFER_SIZE);
+    
+    if (!client_buffer || !powerwall_buffer) {
+        ESP_LOGE(TAG, "Failed to allocate proxy buffers");
+        free(client_buffer);
+        free(powerwall_buffer);
+        close(powerwall_sock);
         close(client_sock);
         vTaskDelete(NULL);
         return;
     }
 
-    ret = esp_tls_conn_new_sync(POWERWALL_IP_STR, strlen(POWERWALL_IP_STR), 443, &powerwall_cfg, powerwall_tls);
-    if (ret != 1) {
-        ESP_LOGE(TAG, "Failed to connect to Powerwall via TLS: %d", ret);
-        esp_tls_conn_destroy(powerwall_tls);
-        esp_tls_conn_destroy(client_tls);
-        close(client_sock);
-        vTaskDelete(NULL);
-        return;
-    }
-
-    ESP_LOGI(TAG, "TLS connection to Powerwall established");
-
-    // Proxy decrypted HTTP data bidirectionally
-    uint8_t *buffer = malloc(PROXY_BUFFER_SIZE);
-    if (!buffer) {
-        ESP_LOGE(TAG, "Failed to allocate proxy buffer");
-        esp_tls_conn_destroy(powerwall_tls);
-        esp_tls_conn_destroy(client_tls);
-        close(client_sock);
-        vTaskDelete(NULL);
-        return;
-    }
+    // Set both sockets to non-blocking mode for bidirectional forwarding
+    int flags = fcntl(client_sock, F_GETFL, 0);
+    fcntl(client_sock, F_SETFL, flags | O_NONBLOCK);
+    flags = fcntl(powerwall_sock, F_GETFL, 0);
+    fcntl(powerwall_sock, F_SETFL, flags | O_NONBLOCK);
 
     TickType_t last_activity = xTaskGetTickCount();
     const TickType_t timeout_ticks = pdMS_TO_TICKS(PROXY_TIMEOUT_MS);
-    bool keep_alive = true;  // Track connection keep-alive preference
-    bool first_client_request = true;  // Track first request to log start-line
-    
-    // Request buffering for complete HTTP request reception
-    uint8_t *request_buffer = malloc(PROXY_BUFFER_SIZE * 4);  // Larger buffer for full request
-    if (!request_buffer) {
-        ESP_LOGE(TAG, "Failed to allocate request buffer");
-        free(buffer);
-        esp_tls_conn_destroy(powerwall_tls);
-        esp_tls_conn_destroy(client_tls);
-        close(client_sock);
-        vTaskDelete(NULL);
-        return;
-    }
-    int request_len = 0;
-    bool request_complete = false;
-    int len = 0;  // For reading data from connections
-    
-    // Response buffering for complete HTTP response reception
-    uint8_t *response_buffer = malloc(PROXY_BUFFER_SIZE * 4);  // Larger buffer for full response
-    if (!response_buffer) {
-        ESP_LOGE(TAG, "Failed to allocate response buffer");
-        free(request_buffer);
-        free(buffer);
-        esp_tls_conn_destroy(powerwall_tls);
-        esp_tls_conn_destroy(client_tls);
-        close(client_sock);
-        vTaskDelete(NULL);
-        return;
-    }
-    int response_len = 0;
-    bool response_complete = false;
 
+    // Bidirectional forwarding loop (encrypted data passthrough)
     while (1) {
-        // Set read timeout for non-blocking behavior
-        struct timeval tv = {.tv_sec = 0, .tv_usec = 100000};
-        
-        // Client -> Powerwall: Read complete request before forwarding
-        if (!request_complete) {
-            int len = esp_tls_conn_read(client_tls, buffer, PROXY_BUFFER_SIZE);
-            if (len > 0) {
-                // Append to request buffer
-                if (request_len + len < PROXY_BUFFER_SIZE * 4) {
-                    memcpy(request_buffer + request_len, buffer, len);
-                    request_len += len;
-                    
-                    // Check if we have complete HTTP request (ends with \r\n\r\n for headers)
-                    // For POST/PUT with body, check Content-Length
-                    if (request_len >= 4) {
-                        char *headers_end = strstr((char*)request_buffer, "\r\n\r\n");
-                        if (headers_end) {
-                            int headers_len = headers_end - (char*)request_buffer + 4;
-                            
-                            // Check for Content-Length header
-                            char *content_length_str = stristr((char*)request_buffer, "\r\nContent-Length:");
-                            int content_length = 0;
-                            if (content_length_str && content_length_str < headers_end) {
-                                sscanf(content_length_str, "\r\nContent-Length: %d", &content_length);
-                            }
-                            
-                            // Request is complete if headers are complete and we have all body data
-                            if (request_len >= headers_len + content_length) {
-                                request_complete = true;
-                            }
-                        }
+        bool activity = false;
+
+        // Client -> Powerwall: Forward encrypted data
+        int len = recv(client_sock, client_buffer, PROXY_BUFFER_SIZE, 0);
+        if (len > 0) {
+            // Forward encrypted data to Powerwall
+            int total_sent = 0;
+            while (total_sent < len) {
+                int sent = send(powerwall_sock, client_buffer + total_sent, len - total_sent, 0);
+                if (sent < 0) {
+                    if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                        ESP_LOGE(TAG, "Error sending to Powerwall: %d", errno);
+                        goto cleanup;
                     }
+                    vTaskDelay(pdMS_TO_TICKS(1));
                 } else {
-                    ESP_LOGE(TAG, "Request too large, buffer overflow");
-                    break;
+                    total_sent += sent;
                 }
-                last_activity = xTaskGetTickCount();
-            } else if (len < 0 && len != ESP_TLS_ERR_SSL_WANT_READ && len != ESP_TLS_ERR_SSL_WANT_WRITE) {
-                ESP_LOGI(TAG, "Client connection closed or error: %d", len);
-                break;
             }
-        }
-        
-        // Once we have complete request, process and forward it
-        if (request_complete) {
-            // Log client start-line on first request
-            if (first_client_request && request_len >= 4) {
-                char start_line[256] = {0};
-                int i;
-                for (i = 0; i < request_len && i < 255 && request_buffer[i] != '\r' && request_buffer[i] != '\n'; i++) {
-                    start_line[i] = request_buffer[i];
-                }
-                start_line[i] = '\0';
-                ESP_LOGI(TAG, "Client request: %s", start_line);
-                first_client_request = false;
-            }
+            activity = true;
             
-            // Debug mode: show full packet from client
             #if DEBUG_MODE
-            ESP_LOGI(TAG, "Client request (%d bytes):", request_len);
-            ESP_LOG_BUFFER_HEXDUMP(TAG, request_buffer, request_len, ESP_LOG_INFO);
-            ESP_LOGI(TAG, "Client request (text): %.*s", request_len, request_buffer);
+            ESP_LOGI(TAG, "Forwarded %d bytes from client to Powerwall (encrypted)", len);
+            ESP_LOG_BUFFER_HEXDUMP(TAG, client_buffer, len < 64 ? len : 64, ESP_LOG_INFO);
             #endif
-            
-            // Check for Connection: close header in client request
-            if (request_len >= 17 && strstr((char*)request_buffer, "Connection: close")) {
-                keep_alive = false;
-                ESP_LOGI(TAG, "Client requested connection close");
-            }
-            
-            // Remove Accept-Encoding header to prevent gzip/deflate compression
-            char *accept_encoding = stristr((char*)request_buffer, "\r\nAccept-Encoding:");
-            if (accept_encoding) {
-                // Find the end of this header line
-                char *header_end = strstr(accept_encoding + 2, "\r\n");
-                if (header_end) {
-                    // Remove the entire Accept-Encoding header line
-                    int header_line_len = header_end - accept_encoding;
-                    memmove(accept_encoding, header_end, request_len - (header_end - (char*)request_buffer));
-                    request_len -= header_line_len;
-                    ESP_LOGI(TAG, "Removed Accept-Encoding header from client request");
+        } else if (len == 0) {
+            ESP_LOGI(TAG, "Client closed connection");
+            break;
+        } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
+            ESP_LOGE(TAG, "Error reading from client: %d", errno);
+            break;
+        }
+
+        // Powerwall -> Client: Forward encrypted data
+        len = recv(powerwall_sock, powerwall_buffer, PROXY_BUFFER_SIZE, 0);
+        if (len > 0) {
+            // Forward encrypted data to client
+            int total_sent = 0;
+            while (total_sent < len) {
+                int sent = send(client_sock, powerwall_buffer + total_sent, len - total_sent, 0);
+                if (sent < 0) {
+                    if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                        ESP_LOGE(TAG, "Error sending to client: %d", errno);
+                        goto cleanup;
+                    }
+                    vTaskDelay(pdMS_TO_TICKS(1));
+                } else {
+                    total_sent += sent;
                 }
             }
+            activity = true;
             
-            // Forward complete request to Powerwall
-            int written = esp_tls_conn_write(powerwall_tls, request_buffer, request_len);
-            if (written < 0) {
-                ESP_LOGE(TAG, "Error writing to Powerwall");
-                break;
-            }
-            
-            // Reset for next request
-            request_len = 0;
-            request_complete = false;
+            #if DEBUG_MODE
+            ESP_LOGI(TAG, "Forwarded %d bytes from Powerwall to client (encrypted)", len);
+            ESP_LOG_BUFFER_HEXDUMP(TAG, powerwall_buffer, len < 64 ? len : 64, ESP_LOG_INFO);
+            #endif
+        } else if (len == 0) {
+            ESP_LOGI(TAG, "Powerwall closed connection");
+            break;
+        } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
+            ESP_LOGE(TAG, "Error reading from Powerwall: %d", errno);
+            break;
+        }
+
+        // Update last activity time if we forwarded any data
+        if (activity) {
             last_activity = xTaskGetTickCount();
         }
 
-        // Powerwall -> Client: Read complete response before forwarding
-        if (!response_complete) {
-            len = esp_tls_conn_read(powerwall_tls, buffer, PROXY_BUFFER_SIZE);
-            if (len > 0) {
-                // Append to response buffer
-                if (response_len + len < PROXY_BUFFER_SIZE * 4) {
-                    memcpy(response_buffer + response_len, buffer, len);
-                    response_len += len;
-                    
-                    // Check if we have complete HTTP response
-                    if (response_len >= 4) {
-                        char *headers_end = strstr((char*)response_buffer, "\r\n\r\n");
-                        if (headers_end) {
-                            int headers_len = headers_end - (char*)response_buffer + 4;
-                            
-                            // Parse Content-Length from response headers
-                            char *content_length_str = stristr((char*)response_buffer, "\r\nContent-Length:");
-                            int content_length = 0;
-                            if (content_length_str && content_length_str < headers_end) {
-                                sscanf(content_length_str, "\r\nContent-Length: %d", &content_length);
-                            }
-                            
-                            // Check for chunked encoding
-                            char *transfer_encoding = stristr((char*)response_buffer, "\r\nTransfer-Encoding:");
-                            bool is_chunked = false;
-                            if (transfer_encoding && transfer_encoding < headers_end) {
-                                if (stristr(transfer_encoding, "chunked")) {
-                                    is_chunked = true;
-                                }
-                            }
-                            
-                            // Response is complete if:
-                            // 1. We have Content-Length and all body data
-                            // 2. Or it's chunked and we received final chunk (0\r\n\r\n)
-                            // 3. Or no body expected (Content-Length: 0 or no Content-Length with no chunked)
-                            if (content_length > 0 && response_len >= headers_len + content_length) {
-                                response_complete = true;
-                            } else if (is_chunked && response_len >= headers_len + 5) {
-                                // Look for chunked terminator: 0\r\n\r\n
-                                if (strstr((char*)response_buffer + headers_len, "\r\n0\r\n\r\n") ||
-                                    strstr((char*)response_buffer + headers_len, "0\r\n\r\n")) {
-                                    response_complete = true;
-                                }
-                            } else if (content_length == 0 && !is_chunked) {
-                                // No body expected
-                                response_complete = true;
-                            }
-                        }
-                    }
-                } else {
-                    ESP_LOGE(TAG, "Response too large, buffer overflow");
-                    break;
-                }
-                last_activity = xTaskGetTickCount();
-            } else if (len < 0 && len != ESP_TLS_ERR_SSL_WANT_READ && len != ESP_TLS_ERR_SSL_WANT_WRITE) {
-                ESP_LOGI(TAG, "Powerwall connection closed or error: %d", len);
-                break;
-            }
-        }
-        
-        // Once we have complete response, process and forward it
-        if (response_complete) {
-            // Parse HTTP response status code from Powerwall
-            if (response_len >= 12 && strncmp((char*)response_buffer, "HTTP/1.", 7) == 0) {
-                // Extract status code (e.g., "HTTP/1.1 200 OK")
-                char status_line[128] = {0};
-                int i;
-                for (i = 0; i < response_len && i < 127 && response_buffer[i] != '\r' && response_buffer[i] != '\n'; i++) {
-                    status_line[i] = response_buffer[i];
-                }
-                status_line[i] = '\0';
-                
-                // Parse status code
-                int status_code = 0;
-                if (sscanf(status_line, "HTTP/%*d.%*d %d", &status_code) == 1) {
-                    ESP_LOGI(TAG, "Powerwall HTTP response: %d (%s)", status_code, status_line);
-                }
-            }
-            
-            // Debug mode: show full response from Powerwall
-            #if DEBUG_MODE
-            ESP_LOGI(TAG, "Powerwall response (%d bytes):", response_len);
-            ESP_LOG_BUFFER_HEXDUMP(TAG, response_buffer, response_len, ESP_LOG_INFO);
-            ESP_LOGI(TAG, "Powerwall response (text): %.*s", response_len, response_buffer);
-            #endif
-            
-            // Check for Connection: close header in Powerwall response
-            if (stristr((char*)response_buffer, "\r\nConnection: close")) {
-                keep_alive = false;
-                ESP_LOGI(TAG, "Powerwall requested connection close");
-            }
-            
-            // Send complete response to client
-            int total_written = 0;
-            while (total_written < response_len) {
-                int written = esp_tls_conn_write(client_tls, response_buffer + total_written, response_len - total_written);
-                if (written < 0) {
-                    ESP_LOGE(TAG, "Failed to write to client: %d", written);
-                    break;
-                }
-                total_written += written;
-            }
-            
-            if (total_written < response_len) {
-                break;
-            }
-            
-            // Reset for next response
-            response_len = 0;
-            response_complete = false;
-            last_activity = xTaskGetTickCount();
-        }
-
-        // Check timeout (longer timeout for keep-alive connections)
-        TickType_t current_timeout = keep_alive ? timeout_ticks * 3 : timeout_ticks;
-        if ((xTaskGetTickCount() - last_activity) > current_timeout) {
-            if (keep_alive) {
-                ESP_LOGI(TAG, "Keep-alive connection timeout");
-            } else {
-                ESP_LOGI(TAG, "Connection timeout");
-            }
+        // Check timeout
+        if ((xTaskGetTickCount() - last_activity) > timeout_ticks) {
+            ESP_LOGI(TAG, "Connection timeout - no activity for %d ms", PROXY_TIMEOUT_MS);
             break;
         }
 
@@ -586,18 +378,13 @@ static void handle_client_task(void *pvParameters)
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 
-    free(buffer);
-    free(request_buffer);
-    free(response_buffer);
-    esp_tls_conn_destroy(powerwall_tls);
-    esp_tls_conn_destroy(client_tls);
+cleanup:
+    free(client_buffer);
+    free(powerwall_buffer);
+    close(powerwall_sock);
     close(client_sock);
     
-    if (keep_alive) {
-        ESP_LOGI(TAG, "Keep-alive connection closed");
-    } else {
-        ESP_LOGI(TAG, "Client connection closed");
-    }
+    ESP_LOGI(TAG, "Client connection closed (passthrough mode)");
     vTaskDelete(NULL);
 }
 
@@ -638,8 +425,8 @@ static void tcp_server_task(void *pvParameters)
         return;
     }
 
-    ESP_LOGI(TAG, "HTTPS Server (TLS termination) listening on port %d", PROXY_PORT);
-    ESP_LOGI(TAG, "Ready to decrypt and proxy HTTPS traffic to Powerwall (%s:443)", POWERWALL_IP_STR);
+    ESP_LOGI(TAG, "TCP Server (SSL passthrough) listening on port %d", PROXY_PORT);
+    ESP_LOGI(TAG, "Ready to forward encrypted SSL/TLS traffic to Powerwall (%s:443) with TTL modification", POWERWALL_IP_STR);
 
     while (1) {
         struct sockaddr_in client_addr;
@@ -657,8 +444,8 @@ static void tcp_server_task(void *pvParameters)
 
         // Spawn a new task to handle each client connection
         // This allows multiple simultaneous connections
-        BaseType_t task_created = xTaskCreate(handle_client_task, "https_client", 
-                                               HTTPS_CLIENT_TASK_STACK_SIZE, (void *)client_sock, 5, NULL);
+        BaseType_t task_created = xTaskCreate(handle_client_task, "ssl_passthrough", 
+                                               SSL_PASSTHROUGH_TASK_STACK_SIZE, (void *)client_sock, 5, NULL);
         if (task_created != pdPASS) {
             ESP_LOGE(TAG, "Failed to create client handler task");
             close(client_sock);
@@ -671,7 +458,8 @@ static void tcp_server_task(void *pvParameters)
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "=== ESP32-S3-POE-ETH WiFi-Ethernet HTTPS Proxy ===");
+    ESP_LOGI(TAG, "=== ESP32-S3-POE-ETH WiFi-Ethernet SSL Bridge ===");
+    ESP_LOGI(TAG, "Mode: SSL Passthrough (no decryption, TTL modification)");
     ESP_LOGI(TAG, "Target: Tesla Powerwall at %s:443", POWERWALL_IP_STR);
 
     // Initialize NVS
