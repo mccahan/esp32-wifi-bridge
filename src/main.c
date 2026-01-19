@@ -270,8 +270,8 @@ static void handle_client_task(void *pvParameters)
     // Note: We provide our own server cert as cacert_buf to satisfy esp_tls requirements,
     // but it won't actually be used for validation due to skip_common_name
     esp_tls_cfg_t powerwall_cfg = {
-        .cacert_buf = (const unsigned char *)server_cert_pem_start,
-        .cacert_bytes = server_cert_pem_end - server_cert_pem_start,
+        .cacert_buf = (const unsigned char *)server_cert_pem,
+        .cacert_bytes = sizeof(server_cert_pem),
         .skip_common_name = true,
         .non_block = false,
         .timeout_ms = 10000,
