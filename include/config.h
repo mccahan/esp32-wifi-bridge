@@ -40,4 +40,9 @@
 // Enable DEBUG_MODE to show full packet contents from Powerwall and client start-line
 #define DEBUG_MODE 0  // Set to 1 to enable debug logging
 
+// ===== Web Server Configuration =====
+#define WEB_SERVER_PORT 80
+#define WEBSERIAL_BUFFER_SIZE 4096
+#define WEBSERIAL_MAX_CLIENTS 4
+
 #endif // CONFIG_H
