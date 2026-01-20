@@ -52,7 +52,7 @@ static int webserial_vprintf(const char *fmt, va_list args)
     }
     
     // Also send to WebSerial using the copied args
-    char log_buffer[256];
+    char log_buffer[WEBSERIAL_LOG_LINE_MAX];
     int len = vsnprintf(log_buffer, sizeof(log_buffer), fmt, args_copy);
     va_end(args_copy);
     

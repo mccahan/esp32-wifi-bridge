@@ -12,6 +12,7 @@
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
+#include "esp_app_format.h"
 #include "esp_system.h"
 #include "esp_wifi.h"
 #include "esp_netif.h"
@@ -234,17 +235,23 @@ static esp_err_t ota_handler(httpd_req_t *req)
         }
         
         // Check image header on first chunk
-        if (!image_header_checked) {
-            esp_app_desc_t new_app_info;
-            if (received >= sizeof(esp_image_header_t) + sizeof(esp_image_segment_header_t) + sizeof(esp_app_desc_t)) {
-                memcpy(&new_app_info, &buf[sizeof(esp_image_header_t) + sizeof(esp_image_segment_header_t)], sizeof(esp_app_desc_t));
-                ESP_LOGI(TAG, "New firmware version: %s", new_app_info.version);
+        if (!image_header_checked && received > 32) {
+            // Simple validation - check ESP32 image magic byte (0xE9)
+            if (buf[0] == 0xE9) {
+                ESP_LOGI(TAG, "OTA image header validated (ESP32 magic byte present)");
                 
+                // Try to get running partition info for comparison
                 const esp_partition_t *running = esp_ota_get_running_partition();
                 esp_app_desc_t running_app_info;
-                if (esp_ota_get_partition_description(running, &running_app_info) == ESP_OK) {
+                if (running && esp_ota_get_partition_description(running, &running_app_info) == ESP_OK) {
                     ESP_LOGI(TAG, "Current firmware version: %s", running_app_info.version);
+                    ESP_LOGI(TAG, "Updating to new firmware...");
                 }
+            } else {
+                ESP_LOGE(TAG, "Invalid firmware image - missing ESP32 magic byte");
+                esp_ota_abort(ota_handle);
+                httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid firmware image");
+                return ESP_FAIL;
             }
             image_header_checked = true;
         }
@@ -310,7 +317,9 @@ void webserial_send(const char *message)
 static void webserial_send_task(void *pvParameters)
 {
     char *message;
-    char sse_buffer[300]; // Buffer for SSE formatted message: "data: <message>\n\n"
+    // Buffer for SSE formatted message: "data: <message>\n\n"
+    // Reserve 10 bytes for SSE protocol overhead
+    char sse_buffer[WEBSERIAL_LOG_LINE_MAX + 10];
     
     while (1) {
         // Wait for a message in the queue

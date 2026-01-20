@@ -44,5 +44,6 @@
 #define WEB_SERVER_PORT 80
 #define WEBSERIAL_BUFFER_SIZE 4096
 #define WEBSERIAL_MAX_CLIENTS 4
+#define WEBSERIAL_LOG_LINE_MAX 256  // Maximum length for single log line
 
 #endif // CONFIG_H
