@@ -7,6 +7,7 @@
  */
 
 #include <string.h>
+#include <stdarg.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
@@ -18,6 +19,7 @@
 #include "esp_netif.h"
 #include "esp_tls.h"
 #include "esp_crt_bundle.h"
+#include "esp_ota_ops.h"
 #include "nvs_flash.h"
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
@@ -30,8 +32,36 @@
 #include "config.h"
 #include "cert.h"
 #include "certs.h"
+#include "webserver.h"
 
 static const char *TAG = "wifi-eth-bridge";
+
+// Custom log output function for WebSerial
+static vprintf_like_t original_log_func = NULL;
+
+static int webserial_vprintf(const char *fmt, va_list args)
+{
+    // Make a copy of args for the second vsnprintf call
+    va_list args_copy;
+    va_copy(args_copy, args);
+    
+    // Call original vprintf for serial output
+    int ret = 0;
+    if (original_log_func) {
+        ret = original_log_func(fmt, args);
+    }
+    
+    // Also send to WebSerial using the copied args
+    char log_buffer[WEBSERIAL_LOG_LINE_MAX];
+    int len = vsnprintf(log_buffer, sizeof(log_buffer), fmt, args_copy);
+    va_end(args_copy);
+    
+    if (len > 0 && len < sizeof(log_buffer)) {
+        webserial_send(log_buffer);
+    }
+    
+    return ret;
+}
 
 // Event group for WiFi and Ethernet status
 static EventGroupHandle_t s_event_group;
@@ -673,6 +703,13 @@ void app_main(void)
 {
     ESP_LOGI(TAG, "=== ESP32-S3-POE-ETH WiFi-Ethernet HTTPS Proxy ===");
     ESP_LOGI(TAG, "Target: Tesla Powerwall at %s:443", POWERWALL_IP_STR);
+    
+    // Print OTA partition information
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    esp_ota_img_states_t ota_state;
+    if (esp_ota_get_state_partition(running, &ota_state) == ESP_OK) {
+        ESP_LOGI(TAG, "Running partition: %s (state: %d)", running->label, ota_state);
+    }
 
     // Initialize NVS
     esp_err_t ret = nvs_flash_init();
@@ -694,6 +731,18 @@ void app_main(void)
 
     // Initialize mDNS
     init_mdns();
+    
+    // Start web server with WebSerial and OTA
+    ESP_LOGI(TAG, "Starting web server...");
+    if (start_webserver() == ESP_OK) {
+        ESP_LOGI(TAG, "Web server started on port %d", WEB_SERVER_PORT);
+        ESP_LOGI(TAG, "Access WebSerial at http://<device-ip>:%d/", WEB_SERVER_PORT);
+        
+        // Set up custom log output to send to WebSerial
+        original_log_func = esp_log_set_vprintf(webserial_vprintf);
+    } else {
+        ESP_LOGE(TAG, "Failed to start web server");
+    }
 
     // Start TCP server task
     xTaskCreate(tcp_server_task, "tcp_server", 4096, NULL, 5, NULL);
