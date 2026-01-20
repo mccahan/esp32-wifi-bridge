@@ -266,66 +266,33 @@ static void wifi_quality_monitor_task(void *pvParameters)
     }
 }
 
-/** System monitoring task - periodically logs CPU load and system metrics */
+/** System monitoring task - periodically logs system metrics */
 static void system_monitor_task(void *pvParameters)
 {
     ESP_LOGI(TAG, "System monitoring started (interval: %d seconds)", SYSTEM_MONITOR_INTERVAL_SEC);
-    
-    // Variables for CPU load calculation
-    uint32_t idle_time_start = 0;
-    uint32_t total_time_start = 0;
     
     while (1) {
         // Wait for the configured interval
         vTaskDelay(pdMS_TO_TICKS(SYSTEM_MONITOR_INTERVAL_SEC * 1000));
         
-        // Get runtime statistics for CPU load calculation
-        TaskStatus_t *task_array;
-        UBaseType_t task_count;
-        uint32_t total_runtime;
-        uint32_t idle_runtime = 0;
+        // Get free heap size
+        uint32_t free_heap = esp_get_free_heap_size();
+        uint32_t min_free_heap = esp_get_minimum_free_heap_size();
         
-        // Get number of tasks
-        task_count = uxTaskGetNumberOfTasks();
+        // Log system status
+        ESP_LOGI(TAG, "System Status - Free Heap: %lu bytes, Min Free: %lu bytes", 
+                 (unsigned long)free_heap, 
+                 (unsigned long)min_free_heap);
         
-        // Allocate array for task status
-        task_array = pvPortMalloc(task_count * sizeof(TaskStatus_t));
-        
-        if (task_array != NULL) {
-            // Get task statistics
-            task_count = uxTaskGetSystemState(task_array, task_count, &total_runtime);
-            
-            // Find IDLE task runtime (there's one per core on ESP32)
-            for (UBaseType_t i = 0; i < task_count; i++) {
-                if (strstr(task_array[i].pcTaskName, "IDLE") != NULL) {
-                    idle_runtime += task_array[i].ulRunTimeCounter;
-                }
-            }
-            
-            // Calculate CPU load percentage
-            if (total_time_start > 0) {
-                uint32_t total_time_diff = total_runtime - total_time_start;
-                uint32_t idle_time_diff = idle_runtime - idle_time_start;
-                
-                if (total_time_diff > 0) {
-                    uint32_t cpu_load = 100 - ((idle_time_diff * 100) / total_time_diff);
-                    ESP_LOGI(TAG, "System Status - CPU Load: %lu%%, Free Heap: %lu bytes", 
-                             (unsigned long)cpu_load, 
-                             (unsigned long)esp_get_free_heap_size());
-                }
-            }
-            
-            // Store current values for next iteration
-            idle_time_start = idle_runtime;
-            total_time_start = total_runtime;
-            
-            // Free allocated memory
-            vPortFree(task_array);
+        // Provide heap health interpretation
+        if (free_heap < 20000) {
+            ESP_LOGW(TAG, "Heap Status: Critical - Low memory!");
+        } else if (free_heap < 50000) {
+            ESP_LOGW(TAG, "Heap Status: Warning - Limited memory");
+        } else if (free_heap < 100000) {
+            ESP_LOGI(TAG, "Heap Status: Fair");
         } else {
-            ESP_LOGW(TAG, "Failed to allocate memory for task statistics");
-            // Still log free heap even if we can't get CPU stats
-            ESP_LOGI(TAG, "System Status - Free Heap: %lu bytes", 
-                     (unsigned long)esp_get_free_heap_size());
+            ESP_LOGI(TAG, "Heap Status: Good");
         }
     }
 }
