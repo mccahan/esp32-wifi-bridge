@@ -368,7 +368,7 @@ esp_err_t start_webserver(void)
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = WEB_SERVER_PORT;
     config.ctrl_port = WEB_SERVER_PORT + 1;
-    config.max_open_sockets = 7;
+    config.max_open_sockets = WEB_SERVER_MAX_SOCKETS;
     config.lru_purge_enable = true;
     
     ESP_LOGI(TAG, "Starting HTTP server on port %d", config.server_port);
@@ -381,7 +381,7 @@ esp_err_t start_webserver(void)
     }
     
     // Create queue for log messages
-    log_queue = xQueueCreate(50, sizeof(char *));
+    log_queue = xQueueCreate(WEBSERIAL_LOG_QUEUE_SIZE, sizeof(char *));
     if (!log_queue) {
         ESP_LOGE(TAG, "Failed to create log queue");
         vSemaphoreDelete(sse_clients_mutex);

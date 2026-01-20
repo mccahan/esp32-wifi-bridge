@@ -45,5 +45,7 @@
 #define WEBSERIAL_BUFFER_SIZE 4096
 #define WEBSERIAL_MAX_CLIENTS 4
 #define WEBSERIAL_LOG_LINE_MAX 256  // Maximum length for single log line
+#define WEBSERIAL_LOG_QUEUE_SIZE 50  // Maximum queued log messages
+#define WEB_SERVER_MAX_SOCKETS 7     // Maximum concurrent HTTP connections
 
 #endif // CONFIG_H

@@ -152,7 +152,7 @@ Access the WebSerial interface to view real-time serial logs from your browser:
    - Default port: 80
 3. The WebSerial page will automatically connect and display logs in real-time
 4. Features:
-   - Real-time log streaming via WebSocket
+   - Real-time log streaming via Server-Sent Events (SSE)
    - Auto-reconnect on disconnect
    - Clear console button
    - Download logs to file
@@ -161,7 +161,7 @@ Access the WebSerial interface to view real-time serial logs from your browser:
 
 The web interface provides:
 - **Live Console**: Real-time serial output with auto-scroll
-- **Connection Status**: Shows WebSocket connection state
+- **Connection Status**: Shows SSE connection state
 - **Controls**: Connect, Clear, and Download logs buttons
 - **Dark Theme**: Easy-to-read console with green text on black background
 
@@ -248,7 +248,7 @@ Uses ESP-IDF components:
 - `esp_eth` - Ethernet driver with W5500 support
 - `esp_wifi` - WiFi client functionality  
 - `esp_netif` - Network interface abstraction
-- `esp_http_server` - HTTP/WebSocket server for WebSerial and OTA
+- `esp_http_server` - HTTP/SSE server for WebSerial and OTA
 - `app_update` - OTA update functionality
 - `mdns` - mDNS responder
 - `lwip` - TCP/IP stack
