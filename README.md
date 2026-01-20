@@ -31,6 +31,8 @@ This project uses the ESP32-S3-POE-ETH board (Waveshare) with **ESP-IDF framewor
 - **mDNS**: Advertises "_powerwall" service on Ethernet interface
 - **Bidirectional**: Handles decrypted HTTP traffic in both directions with 2KB buffers
 - **Memory Optimized**: Uses esp_tls with dynamic buffers and asymmetric content lengths
+- **WebSerial**: Web-based serial monitor for viewing logs in real-time via browser
+- **OTA Updates**: Over-the-air firmware updates via web interface
 
 ## Architecture
 
@@ -75,6 +77,9 @@ Edit `include/config.h` to customize:
 // Proxy Settings
 #define PROXY_PORT 443
 #define PROXY_TIMEOUT_MS 30000
+
+// Web Server Settings
+#define WEB_SERVER_PORT 80
 
 // mDNS Settings
 #define MDNS_HOSTNAME "powerwall"
@@ -137,6 +142,63 @@ The service can be discovered on the local network as:
 - Service: `_powerwall._tcp`
 - Port: 443
 
+## WebSerial - Web-Based Serial Monitor
+
+Access the WebSerial interface to view real-time serial logs from your browser:
+
+1. Connect to the same network as the ESP32 (Ethernet network)
+2. Open a web browser and navigate to:
+   - `http://<device-ip>/` (find IP in serial output or use `powerwall.local` if mDNS is working)
+   - Default port: 80
+3. The WebSerial page will automatically connect and display logs in real-time
+4. Features:
+   - Real-time log streaming via WebSocket
+   - Auto-reconnect on disconnect
+   - Clear console button
+   - Download logs to file
+
+### WebSerial Interface
+
+The web interface provides:
+- **Live Console**: Real-time serial output with auto-scroll
+- **Connection Status**: Shows WebSocket connection state
+- **Controls**: Connect, Clear, and Download logs buttons
+- **Dark Theme**: Easy-to-read console with green text on black background
+
+## OTA Firmware Updates
+
+Update firmware wirelessly without connecting USB cable:
+
+1. Build your firmware binary:
+   ```bash
+   pio run
+   # or
+   idf.py build
+   ```
+
+2. Access the WebSerial interface at `http://<device-ip>/`
+
+3. Scroll to the "OTA Firmware Update" section
+
+4. Click "Choose File" and select your firmware binary:
+   - PlatformIO: `.pio/build/esp32-s3-devkitc-1/firmware.bin`
+   - ESP-IDF: `build/main.bin`
+
+5. Click "Upload Firmware"
+
+6. Wait for upload to complete (progress bar shows status)
+
+7. Device will automatically reboot with new firmware
+
+### OTA Partition Scheme
+
+The device uses a dual-partition OTA scheme:
+- `ota_0`: 1MB - First OTA partition
+- `ota_1`: 1MB - Second OTA partition
+- `otadata`: Stores which partition to boot from
+
+Updates alternate between partitions, allowing rollback to previous firmware if needed.
+
 ## Serial Output Example
 
 ```
@@ -171,12 +233,14 @@ This project was migrated from Arduino framework to ESP-IDF to resolve W5500 lib
 ## Files
 
 - `src/main.c` - Main application code (ESP-IDF)
+- `src/webserver.c` - HTTP server with WebSerial and OTA support
 - `include/config.h` - Configuration settings
+- `include/webserver.h` - Web server header
 - `include/cert.h` - Self-signed certificate (for reference)
 - `platformio.ini` - PlatformIO configuration (ESP-IDF framework)
 - `CMakeLists.txt` - ESP-IDF build configuration
 - `sdkconfig.defaults` - ESP-IDF default configuration
-- `partitions.csv` - Partition table
+- `partitions.csv` - OTA partition table (dual partition scheme)
 
 ## Dependencies
 
@@ -184,6 +248,8 @@ Uses ESP-IDF components:
 - `esp_eth` - Ethernet driver with W5500 support
 - `esp_wifi` - WiFi client functionality  
 - `esp_netif` - Network interface abstraction
+- `esp_http_server` - HTTP/WebSocket server for WebSerial and OTA
+- `app_update` - OTA update functionality
 - `mdns` - mDNS responder
 - `lwip` - TCP/IP stack
 - `nvs_flash` - Non-volatile storage

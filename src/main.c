@@ -41,15 +41,21 @@ static vprintf_like_t original_log_func = NULL;
 
 static int webserial_vprintf(const char *fmt, va_list args)
 {
+    // Make a copy of args for the second vsnprintf call
+    va_list args_copy;
+    va_copy(args_copy, args);
+    
     // Call original vprintf for serial output
     int ret = 0;
     if (original_log_func) {
         ret = original_log_func(fmt, args);
     }
     
-    // Also send to WebSerial
+    // Also send to WebSerial using the copied args
     char log_buffer[256];
-    int len = vsnprintf(log_buffer, sizeof(log_buffer), fmt, args);
+    int len = vsnprintf(log_buffer, sizeof(log_buffer), fmt, args_copy);
+    va_end(args_copy);
+    
     if (len > 0 && len < sizeof(log_buffer)) {
         webserial_send(log_buffer);
     }
