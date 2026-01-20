@@ -2,12 +2,13 @@
  * Web Server with WebSerial and OTA Support
  * 
  * Provides:
- * - WebSerial interface for viewing logs via WebSocket
+ * - WebSerial interface for viewing logs via Server-Sent Events (SSE)
  * - OTA firmware update via HTTP POST
  * - Web UI for both features
  */
 
 #include <string.h>
+#include <sys/socket.h>
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
@@ -16,23 +17,25 @@
 #include "esp_netif.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/queue.h"
 #include "config.h"
 #include "webserver.h"
 
 static const char *TAG = "webserver";
 
 static httpd_handle_t server = NULL;
-static SemaphoreHandle_t ws_clients_mutex = NULL;
+static SemaphoreHandle_t sse_clients_mutex = NULL;
+static QueueHandle_t log_queue = NULL;
 
-// WebSocket client tracking
+// SSE client tracking
 typedef struct {
     int fd;
     bool active;
-} ws_client_t;
+} sse_client_t;
 
-static ws_client_t ws_clients[WEBSERIAL_MAX_CLIENTS] = {0};
+static sse_client_t sse_clients[WEBSERIAL_MAX_CLIENTS] = {0};
 
-// HTML page for WebSerial
+// HTML page for WebSerial using Server-Sent Events
 static const char *webserial_html = 
 "<!DOCTYPE html><html><head><title>WebSerial - ESP32 Bridge</title>"
 "<meta name='viewport' content='width=device-width,initial-scale=1'>"
@@ -72,24 +75,23 @@ static const char *webserial_html =
 "<div id='progress-text'></div>"
 "</div>"
 "<script>"
-"let ws;let logs=[];"
+"let eventSource;let logs=[];"
 "function connect(){"
-"const proto=(location.protocol==='https:')?'wss:':'ws:';"
-"ws=new WebSocket(proto+'//'+location.host+'/ws');"
-"ws.onopen=()=>{"
+"if(eventSource){eventSource.close();}"
+"eventSource=new EventSource('/events');"
+"eventSource.onopen=()=>{"
 "document.getElementById('status').className='status connected';"
 "document.getElementById('status').textContent='Connected';"
 "document.getElementById('connectBtn').disabled=true;"
 "addLog('WebSerial connected');"
 "};"
-"ws.onclose=()=>{"
+"eventSource.onerror=()=>{"
 "document.getElementById('status').className='status disconnected';"
 "document.getElementById('status').textContent='Disconnected';"
 "document.getElementById('connectBtn').disabled=false;"
 "addLog('WebSerial disconnected');"
 "};"
-"ws.onerror=(e)=>{addLog('WebSocket error: '+e);};"
-"ws.onmessage=(e)=>{addLog(e.data);};"
+"eventSource.onmessage=(e)=>{addLog(e.data);};"
 "}"
 "function addLog(msg){"
 "logs.push(msg);"
@@ -142,72 +144,42 @@ static const char *webserial_html =
 "window.onload=connect;"
 "</script></div></body></html>";
 
-// WebSocket handler
-static esp_err_t ws_handler(httpd_req_t *req)
+// Server-Sent Events handler for log streaming
+static esp_err_t events_handler(httpd_req_t *req)
 {
-    if (req->method == HTTP_GET) {
-        ESP_LOGI(TAG, "WebSocket handshake request");
-        return ESP_OK;
-    }
+    ESP_LOGI(TAG, "New SSE client connected");
     
-    httpd_ws_frame_t ws_pkt;
-    memset(&ws_pkt, 0, sizeof(httpd_ws_frame_t));
-    ws_pkt.type = HTTPD_WS_TYPE_TEXT;
+    // Set headers for Server-Sent Events
+    httpd_resp_set_type(req, "text/event-stream");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
+    httpd_resp_set_hdr(req, "Connection", "keep-alive");
     
-    // First, check frame type
-    esp_err_t ret = httpd_ws_recv_frame(req, &ws_pkt, 0);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "httpd_ws_recv_frame failed: %d", ret);
-        return ret;
-    }
+    int fd = httpd_req_to_sockfd(req);
     
-    ESP_LOGI(TAG, "WebSocket frame: type=%d, len=%d", ws_pkt.type, ws_pkt.len);
-    
-    // If it's a ping, send pong
-    if (ws_pkt.type == HTTPD_WS_TYPE_PING) {
-        ws_pkt.type = HTTPD_WS_TYPE_PONG;
-        return httpd_ws_send_frame(req, &ws_pkt);
-    }
-    
-    // Track new client connection
-    if (ws_clients_mutex && xSemaphoreTake(ws_clients_mutex, pdMS_TO_TICKS(1000))) {
-        int fd = httpd_req_to_sockfd(req);
-        bool found = false;
-        
+    // Register this client
+    if (sse_clients_mutex && xSemaphoreTake(sse_clients_mutex, pdMS_TO_TICKS(1000))) {
         for (int i = 0; i < WEBSERIAL_MAX_CLIENTS; i++) {
-            if (ws_clients[i].fd == fd && ws_clients[i].active) {
-                found = true;
+            if (!sse_clients[i].active) {
+                sse_clients[i].fd = fd;
+                sse_clients[i].active = true;
+                ESP_LOGI(TAG, "SSE client registered: fd=%d, slot=%d", fd, i);
                 break;
             }
         }
-        
-        if (!found) {
-            for (int i = 0; i < WEBSERIAL_MAX_CLIENTS; i++) {
-                if (!ws_clients[i].active) {
-                    ws_clients[i].fd = fd;
-                    ws_clients[i].active = true;
-                    ESP_LOGI(TAG, "New WebSerial client connected: fd=%d, slot=%d", fd, i);
-                    
-                    // Send welcome message
-                    const char *welcome = "=== ESP32 WiFi-Ethernet Bridge WebSerial ===\n";
-                    httpd_ws_frame_t welcome_pkt = {
-                        .type = HTTPD_WS_TYPE_TEXT,
-                        .payload = (uint8_t *)welcome,
-                        .len = strlen(welcome)
-                    };
-                    httpd_ws_send_frame(req, &welcome_pkt);
-                    break;
-                }
-            }
-        }
-        
-        xSemaphoreGive(ws_clients_mutex);
+        xSemaphoreGive(sse_clients_mutex);
     }
+    
+    // Send welcome message
+    const char *welcome = "data: === ESP32 WiFi-Ethernet Bridge WebSerial ===\n\n";
+    httpd_resp_send_chunk(req, welcome, strlen(welcome));
+    
+    // Keep connection alive - client will handle reconnect if needed
+    // The connection will be maintained and messages sent via webserial_send_task
     
     return ESP_OK;
 }
 
-// Root page handler - redirect to WebSerial
+// Root page handler - serve WebSerial interface
 static esp_err_t root_handler(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "text/html");
@@ -318,28 +290,66 @@ static esp_err_t ota_handler(httpd_req_t *req)
 // Send message to all WebSerial clients
 void webserial_send(const char *message)
 {
-    if (!server || !ws_clients_mutex) {
+    if (!server || !log_queue) {
         return;
     }
     
-    if (xSemaphoreTake(ws_clients_mutex, pdMS_TO_TICKS(100))) {
-        for (int i = 0; i < WEBSERIAL_MAX_CLIENTS; i++) {
-            if (ws_clients[i].active) {
-                httpd_ws_frame_t ws_pkt = {
-                    .type = HTTPD_WS_TYPE_TEXT,
-                    .payload = (uint8_t *)message,
-                    .len = strlen(message)
-                };
-                
-                // Try to send, if it fails, mark client as inactive
-                if (httpd_ws_send_frame_async(server, ws_clients[i].fd, &ws_pkt) != ESP_OK) {
-                    ESP_LOGW(TAG, "Failed to send to WebSerial client fd=%d, marking inactive", ws_clients[i].fd);
-                    ws_clients[i].active = false;
-                    ws_clients[i].fd = -1;
-                }
-            }
+    // Queue the message for sending by the WebSerial task
+    // Don't block if queue is full - just drop the message
+    char *msg_copy = malloc(strlen(message) + 1);
+    if (msg_copy) {
+        strcpy(msg_copy, message);
+        if (xQueueSend(log_queue, &msg_copy, 0) != pdTRUE) {
+            // Queue full, drop message
+            free(msg_copy);
         }
-        xSemaphoreGive(ws_clients_mutex);
+    }
+}
+
+// Task to send queued log messages to SSE clients
+static void webserial_send_task(void *pvParameters)
+{
+    char *message;
+    char sse_buffer[300]; // Buffer for SSE formatted message: "data: <message>\n\n"
+    
+    while (1) {
+        // Wait for a message in the queue
+        if (xQueueReceive(log_queue, &message, portMAX_DELAY) == pdTRUE) {
+            if (!message || !server || !sse_clients_mutex) {
+                if (message) free(message);
+                continue;
+            }
+            
+            // Format as SSE message: "data: <message>\n\n"
+            int len = snprintf(sse_buffer, sizeof(sse_buffer), "data: %s\n\n", message);
+            if (len < 0 || len >= sizeof(sse_buffer)) {
+                free(message);
+                continue;
+            }
+            
+            // Take mutex to access client list
+            if (xSemaphoreTake(sse_clients_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+                for (int i = 0; i < WEBSERIAL_MAX_CLIENTS; i++) {
+                    if (sse_clients[i].active && sse_clients[i].fd >= 0) {
+                        // Set a short timeout on the socket
+                        struct timeval tv = {.tv_sec = 0, .tv_usec = 50000}; // 50ms
+                        setsockopt(sse_clients[i].fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+                        
+                        // Send SSE formatted message
+                        ssize_t sent = send(sse_clients[i].fd, sse_buffer, len, MSG_DONTWAIT);
+                        if (sent <= 0) {
+                            // Failed to send, mark client inactive
+                            ESP_LOGD(TAG, "SSE client fd=%d inactive, removing", sse_clients[i].fd);
+                            sse_clients[i].active = false;
+                            sse_clients[i].fd = -1;
+                        }
+                    }
+                }
+                xSemaphoreGive(sse_clients_mutex);
+            }
+            
+            free(message);
+        }
     }
 }
 
@@ -354,17 +364,33 @@ esp_err_t start_webserver(void)
     
     ESP_LOGI(TAG, "Starting HTTP server on port %d", config.server_port);
     
-    // Create mutex for WebSocket clients
-    ws_clients_mutex = xSemaphoreCreateMutex();
-    if (!ws_clients_mutex) {
+    // Create mutex for SSE clients
+    sse_clients_mutex = xSemaphoreCreateMutex();
+    if (!sse_clients_mutex) {
         ESP_LOGE(TAG, "Failed to create mutex");
+        return ESP_FAIL;
+    }
+    
+    // Create queue for log messages
+    log_queue = xQueueCreate(50, sizeof(char *));
+    if (!log_queue) {
+        ESP_LOGE(TAG, "Failed to create log queue");
+        vSemaphoreDelete(sse_clients_mutex);
         return ESP_FAIL;
     }
     
     // Initialize client tracking
     for (int i = 0; i < WEBSERIAL_MAX_CLIENTS; i++) {
-        ws_clients[i].fd = -1;
-        ws_clients[i].active = false;
+        sse_clients[i].fd = -1;
+        sse_clients[i].active = false;
+    }
+    
+    // Start task to send messages to SSE clients
+    if (xTaskCreate(webserial_send_task, "webserial_send", 4096, NULL, 5, NULL) != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create webserial send task");
+        vQueueDelete(log_queue);
+        vSemaphoreDelete(sse_clients_mutex);
+        return ESP_FAIL;
     }
     
     if (httpd_start(&server, &config) == ESP_OK) {
@@ -377,15 +403,14 @@ esp_err_t start_webserver(void)
         };
         httpd_register_uri_handler(server, &root_uri);
         
-        // WebSocket endpoint
-        httpd_uri_t ws_uri = {
-            .uri = "/ws",
+        // SSE endpoint for log streaming
+        httpd_uri_t events_uri = {
+            .uri = "/events",
             .method = HTTP_GET,
-            .handler = ws_handler,
-            .user_ctx = NULL,
-            .is_websocket = true
+            .handler = events_handler,
+            .user_ctx = NULL
         };
-        httpd_register_uri_handler(server, &ws_uri);
+        httpd_register_uri_handler(server, &events_uri);
         
         // OTA endpoint
         httpd_uri_t ota_uri = {
@@ -415,8 +440,13 @@ void stop_webserver(void)
         server = NULL;
     }
     
-    if (ws_clients_mutex) {
-        vSemaphoreDelete(ws_clients_mutex);
-        ws_clients_mutex = NULL;
+    if (sse_clients_mutex) {
+        vSemaphoreDelete(sse_clients_mutex);
+        sse_clients_mutex = NULL;
+    }
+    
+    if (log_queue) {
+        vQueueDelete(log_queue);
+        log_queue = NULL;
     }
 }
