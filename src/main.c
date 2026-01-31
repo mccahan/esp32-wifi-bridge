@@ -539,8 +539,17 @@ static void init_mdns(void)
     ESP_ERROR_CHECK(mdns_hostname_set(MDNS_HOSTNAME));
     ESP_LOGI(TAG, "mDNS hostname set to: %s", MDNS_HOSTNAME);
 
-    mdns_service_add(NULL, MDNS_SERVICE, MDNS_PROTOCOL, PROXY_PORT, NULL, 0);
-    ESP_LOGI(TAG, "mDNS service added: %s.%s on port %d", MDNS_SERVICE, MDNS_PROTOCOL, PROXY_PORT);
+    // Create TXT records with device info
+    mdns_txt_item_t txt_records[] = {
+        {"wifi_ssid", WIFI_SSID},
+        {"target", POWERWALL_IP_STR},
+        {"ota_port", "8080"},
+    };
+
+    mdns_service_add(NULL, MDNS_SERVICE, MDNS_PROTOCOL, PROXY_PORT, txt_records,
+                     sizeof(txt_records) / sizeof(txt_records[0]));
+    ESP_LOGI(TAG, "mDNS service added: %s.%s on port %d (wifi: %s)",
+             MDNS_SERVICE, MDNS_PROTOCOL, PROXY_PORT, WIFI_SSID);
 }
 
 /** WiFi quality monitoring task - periodically logs connection quality */
