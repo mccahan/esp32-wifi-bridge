@@ -295,7 +295,7 @@ static void check_powerwall_connectivity(void)
 #define ICON_SIGNAL "<svg class=\"i\" viewBox=\"0 0 24 24\"><path d=\"M2 22h20V2L2 22z\"/></svg>"
 #define ICON_BATTERY "<svg class=\"i\" viewBox=\"0 0 24 24\"><path d=\"M16 4h-2V2h-4v2H8C6.9 4 6 4.9 6 6v14c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 16H8V6h8v14z\"/></svg>"
 #define ICON_DNS "<svg class=\"i\" viewBox=\"0 0 24 24\"><circle cx=\"12\" cy=\"12\" r=\"10\"/><circle cx=\"12\" cy=\"12\" r=\"3\" fill=\"#1e293b\"/></svg>"
-#define ICON_SETTINGS "<svg class=\"i\" viewBox=\"0 0 24 24\"><path d=\"M12 8a4 4 0 100 8 4 4 0 000-8zm8.94 3A8.99 8.99 0 0013 3.06V1h-2v2.06A8.99 8.99 0 003.06 11H1v2h2.06A8.99 8.99 0 0011 20.94V23h2v-2.06A8.99 8.99 0 0020.94 13H23v-2h-2.06z\"/></svg>"
+#define ICON_SETTINGS "<svg class=\"i\" viewBox=\"0 0 1200 1200\"><path d=\"m1061.8 517.5-59.5-13.5c-10.3-42.8-27-83.3-50.3-119.8l32.8-52.5c12.2-19.7 9.5-44.8-7-61l-48.5-48.5c-16.3-16.5-41.3-19.3-61-7l-51.8 32.5c-37.3-23-77.8-39.8-120.2-49.3l-13.7-60.2c-5.3-22.5-25-38.3-48.2-38.3h-68.5c-23.3 0-43 15.8-48.2 38.3l-13.5 59.5c-42.8 10.3-83.3 27-119.8 50.3l-52.5-32.8c-19.7-12.2-44.8-9.5-61 7l-48.5 48.5c-16.5 16.3-19.3 41.3-7 61l32.5 51.8c-23 37.3-39.8 77.8-49.3 120.2l-60.5 14c-22.3 5-38 24.8-38 47.8v69c0 23 15.8 42.8 38.3 48l59.5 13.5c10.3 42.8 27 83.3 50.3 119.8l-32.8 52.5c-12.2 19.7-9.5 44.8 7 61l48.5 48.5c16.3 16.5 41.3 19.3 61 7l51.8-32.5c37.3 23 77.8 39.8 120.2 49.3l13.7 60.2c5.3 22.5 25 38.3 48.2 38.3h68.5c23.3 0 43-15.8 48.2-38.3l13.5-59.5c42.8-10.3 83.3-27 119.8-50.3l52.5 32.8c19.7 12.2 44.8 9.5 61-7l48.5-48.5c16.5-16.3 19.3-41.3 7-61l-32.5-51.8c23-37.3 39.8-77.8 49.3-120.2l60.5-14c22.3-5 38-24.8 38-47.8v-69c0-23-15.8-42.8-38.3-48zM855.8 600c0 141-114.8 255.7-255.7 255.7-339.3-14-339.2-497.5 0-511.5 141 0 255.7 114.8 255.7 255.8z\"/></svg>"
 #define ICON_SEARCH "<svg class=\"i\" viewBox=\"0 0 24 24\"><circle cx=\"10\" cy=\"10\" r=\"7\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"/><path d=\"M15 15l6 6\" stroke=\"currentColor\" stroke-width=\"2\"/></svg>"
 #define ICON_SAVE "<svg class=\"i\" viewBox=\"0 0 24 24\"><path d=\"M17 3H5a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2V7l-4-4zm-5 16a3 3 0 110-6 3 3 0 010 6zm3-10H5V5h10v4z\"/></svg>"
 #define ICON_MEMORY "<svg class=\"i\" viewBox=\"0 0 24 24\"><rect x=\"4\" y=\"4\" width=\"16\" height=\"16\" rx=\"2\"/><rect x=\"8\" y=\"8\" width=\"8\" height=\"8\" fill=\"#1e293b\"/></svg>"
@@ -391,21 +391,21 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
     // WiFi status (clickable to show/hide WiFi config)
     httpd_resp_sendstr_chunk(req,
         "<div class=\"status-item\" style=\"cursor:pointer\" onclick=\"document.getElementById('wificfg').style.display=document.getElementById('wificfg').style.display==='none'?'block':'none'\">"
-        "<div class=\"label\">" ICON_WIFI " WiFi " ICON_EXPAND "</div>");
+        "<div class=\"label\">" ICON_WIFI " WiFi " ICON_SETTINGS "</div>");
     snprintf(buf, sizeof(buf),
         "<div class=\"value\"><span class=\"status-dot %s\"></span>%s</div></div>",
         wifi_connected ? "status-ok" : "status-err",
         wifi_connected ? "Connected" : "Disconnected");
     httpd_resp_sendstr_chunk(req, buf);
 
-    // Signal strength
+    // Signal strength (with ID for auto-refresh)
     if (wifi_connected) {
         snprintf(buf, sizeof(buf),
-            "<div class=\"status-item\"><div class=\"label\">" ICON_SIGNAL " Signal</div><div class=\"value\">%d dBm (%s)</div></div>",
+            "<div class=\"status-item\"><div class=\"label\">" ICON_SIGNAL " Signal</div><div class=\"value\" id=\"sig\">%d dBm (%s)</div></div>",
             rssi, rssi > -50 ? "Excellent" : rssi > -60 ? "Good" : rssi > -70 ? "Fair" : "Weak");
     } else {
         snprintf(buf, sizeof(buf),
-            "<div class=\"status-item\"><div class=\"label\">" ICON_SIGNAL " Signal</div><div class=\"value\">-</div></div>");
+            "<div class=\"status-item\"><div class=\"label\">" ICON_SIGNAL " Signal</div><div class=\"value\" id=\"sig\">-</div></div>");
     }
     httpd_resp_sendstr_chunk(req, buf);
 
@@ -461,14 +461,19 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
         "<button type=\"button\" class=\"btn btn-secondary\" onclick=\"if(confirm('Reboot device?'))document.getElementById('rebootform').submit()\">"
         ICON_UPDATE " Reboot</button></form></div>");
 
-    // Recent requests card with TTFB
-    snprintf(buf, sizeof(buf),
+    // Recent requests card with TTFB (IDs for auto-refresh)
+    httpd_resp_sendstr_chunk(req,
         "<div class=\"card\"><h2>" ICON_SWAP " Recent Requests</h2>"
-        "<div class=\"text-sm text-muted\" style=\"margin-bottom:0.5rem\">Avg TTFB: %lu ms</div>"
-        "<table style=\"width:100%%;font-size:0.875rem\">"
-        "<tr style=\"color:#94a3b8\"><td>Age</td><td>Source</td><td>Req/Resp</td><td>TTFB</td><td>Status</td></tr>",
+        "<div class=\"flex\" style=\"justify-content:space-between;margin-bottom:0.5rem\">");
+    snprintf(buf, sizeof(buf),
+        "<span class=\"text-sm text-muted\">Avg TTFB: <span id=\"avgttfb\">%lu</span> ms</span>",
         (unsigned long)avg_ttfb_ms);
     httpd_resp_sendstr_chunk(req, buf);
+    httpd_resp_sendstr_chunk(req,
+        "<span class=\"text-xs text-muted\">Updated: <span id=\"lastref\">now</span></span></div>"
+        "<table style=\"width:100%;font-size:0.875rem\">"
+        "<tr style=\"color:#94a3b8\"><td>Age</td><td>Source</td><td>Req/Resp</td><td>TTFB</td><td>Status</td></tr>"
+        "<tbody id=\"reqtbl\">");
 
     if (request_log_mutex && xSemaphoreTake(request_log_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
         int64_t now = esp_timer_get_time() / 1000000;
@@ -500,7 +505,7 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
         xSemaphoreGive(request_log_mutex);
     }
 
-    httpd_resp_sendstr_chunk(req, "</table></div>");
+    httpd_resp_sendstr_chunk(req, "</tbody></table></div>");
 
     // Firmware card (at bottom)
     httpd_resp_sendstr_chunk(req,
@@ -531,7 +536,7 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
         "</form><form id=\"rb\" method=\"POST\" action=\"/ota/rollback\"></form>"
         "<div class=\"alert alert-warn mt-2\">" ICON_WARN " Device will reboot after update</div></div>");
 
-    // JavaScript for WiFi scanning
+    // JavaScript for WiFi scanning and auto-refresh
     httpd_resp_sendstr_chunk(req,
         "<script>"
         "function scanWifi(){"
@@ -540,6 +545,22 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
         "fetch('/wifi/scan').then(r=>r.json()).then(d=>{"
         "s.innerHTML=d.networks.map(n=>'<option value=\"'+n.ssid+'\">'+n.ssid+' ('+n.rssi+'dBm)</option>').join('');"
         "}).catch(e=>{s.innerHTML='<option>Scan failed</option>';});}"
+        "function sigQ(r){return r>-50?'Excellent':r>-60?'Good':r>-70?'Fair':'Weak';}"
+        "function fmtAge(s){return s>=3600?Math.floor(s/3600)+'h':s>=60?Math.floor(s/60)+'m':s+'s';}"
+        "var lastOk=Date.now(),fetching=false;"
+        "function updAge(){var s=Math.floor((Date.now()-lastOk)/1000);var el=document.getElementById('lastref');"
+        "if(s>30){el.innerHTML='<span style=\"color:#ef4444\">'+s+'s ago (stale)</span>';}else{el.textContent=s+'s ago';}}"
+        "function refresh(){if(fetching)return;fetching=true;"
+        "Promise.all([fetch('/api/rssi').then(r=>r.text()),fetch('/api/requests').then(r=>r.json())])"
+        ".then(function(d){fetching=false;lastOk=Date.now();"
+        "var r=parseInt(d[0]);document.getElementById('sig').textContent=r?r+' dBm ('+sigQ(r)+')':'-';"
+        "var req=d[1];document.getElementById('avgttfb').textContent=req.avg_ttfb;"
+        "var h='';req.requests.forEach(function(e){"
+        "var c=e.ok?'#22c55e':'#ef4444';"
+        "h+='<tr><td>'+fmtAge(e.age)+'</td><td>'+e.ip+'</td><td>'+e.in+'/'+e.out+'</td><td>'+e.ttfb+'ms</td><td style=\"color:'+c+'\">'+(e.ok?'OK':'ERR')+'</td></tr>';});"
+        "document.getElementById('reqtbl').innerHTML=h;updAge();})"
+        ".catch(function(){fetching=false;updAge();});}"
+        "setInterval(refresh,5000);setInterval(updAge,1000);refresh();"
         "</script></div></body></html>");
 
     httpd_resp_sendstr_chunk(req, NULL);  // End chunked response
@@ -878,6 +899,43 @@ static esp_err_t api_rssi_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+/** API endpoint for recent requests */
+static esp_err_t api_requests_handler(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "application/json");
+
+    char buf[128];
+    snprintf(buf, sizeof(buf), "{\"avg_ttfb\":%lu,\"requests\":[", (unsigned long)avg_ttfb_ms);
+    httpd_resp_sendstr_chunk(req, buf);
+
+    if (request_log_mutex && xSemaphoreTake(request_log_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        int64_t now = esp_timer_get_time() / 1000000;
+        bool first = true;
+        for (int i = 0; i < REQUEST_LOG_SIZE; i++) {
+            int idx = (request_log_index - 1 - i + REQUEST_LOG_SIZE) % REQUEST_LOG_SIZE;
+            request_log_entry_t *e = &request_log[idx];
+            if (!e->valid) continue;
+
+            int64_t age = now - e->timestamp;
+            uint8_t *ip = (uint8_t *)&e->source_ip;
+
+            snprintf(buf, sizeof(buf),
+                "%s{\"age\":%lld,\"ip\":\"%d.%d.%d.%d\",\"in\":%lu,\"out\":%lu,\"ttfb\":%u,\"ok\":%d}",
+                first ? "" : ",",
+                (long long)age, ip[0], ip[1], ip[2], ip[3],
+                (unsigned long)e->bytes_in, (unsigned long)e->bytes_out,
+                e->ttfb_ms, e->result == 0 ? 1 : 0);
+            httpd_resp_sendstr_chunk(req, buf);
+            first = false;
+        }
+        xSemaphoreGive(request_log_mutex);
+    }
+
+    httpd_resp_sendstr_chunk(req, "]}");
+    httpd_resp_sendstr_chunk(req, NULL);
+    return ESP_OK;
+}
+
 /** Reboot handler */
 static esp_err_t reboot_handler(httpd_req_t *req)
 {
@@ -1008,6 +1066,14 @@ static esp_err_t start_ota_server(void)
         .handler = api_rssi_handler,
     };
     httpd_register_uri_handler(ota_server, &api_rssi);
+
+    // API requests endpoint (JSON array of recent requests)
+    httpd_uri_t api_requests = {
+        .uri = "/api/requests",
+        .method = HTTP_GET,
+        .handler = api_requests_handler,
+    };
+    httpd_register_uri_handler(ota_server, &api_requests);
 
     ESP_LOGI(TAG, "OTA server started on port %d", OTA_HTTP_PORT);
     return ESP_OK;
