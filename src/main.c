@@ -108,6 +108,9 @@ static EventGroupHandle_t s_event_group;
 #define ETH_CONNECTED_BIT BIT1
 #define ETH_GOT_IP_BIT BIT2
 
+// CPU usage tracking (percentage, 0-100)
+static volatile uint8_t cpu_usage_percent = 0;
+
 // Ethernet and WiFi handles
 static esp_eth_handle_t eth_handle = NULL;
 static esp_netif_t *eth_netif = NULL;
@@ -452,9 +455,14 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
     // System info card
     httpd_resp_sendstr_chunk(req, "<div class=\"card\"><h2>" ICON_MEMORY " System</h2><div class=\"grid\">");
     snprintf(buf, sizeof(buf),
+        "<div class=\"status-item\"><div class=\"label\">CPU</div><div class=\"value\" id=\"cpu\">%u%%</div></div>"
+        "<div class=\"status-item\"><div class=\"label\">Heap</div><div class=\"value\">%lu KB</div></div>",
+        cpu_usage_percent, (unsigned long)(esp_get_free_heap_size() / 1024));
+    httpd_resp_sendstr_chunk(req, buf);
+    snprintf(buf, sizeof(buf),
         "<div class=\"status-item\"><div class=\"label\">WiFi IP</div><div class=\"value\">%s</div></div>"
-        "<div class=\"status-item\"><div class=\"label\">Heap</div><div class=\"value\">%lu KB</div></div></div>",
-        ip_str, (unsigned long)(esp_get_free_heap_size() / 1024));
+        "</div>",
+        ip_str);
     httpd_resp_sendstr_chunk(req, buf);
     httpd_resp_sendstr_chunk(req,
         "<hr><form id=\"rebootform\" method=\"POST\" action=\"/reboot\">"
@@ -551,9 +559,10 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
         "function updAge(){var s=Math.floor((Date.now()-lastOk)/1000);var el=document.getElementById('lastref');"
         "if(s>30){el.innerHTML='<span style=\"color:#ef4444\">'+s+'s ago (stale)</span>';}else{el.textContent=s+'s ago';}}"
         "function refresh(){if(fetching)return;fetching=true;"
-        "Promise.all([fetch('/api/rssi').then(r=>r.text()),fetch('/api/requests').then(r=>r.json())])"
+        "Promise.all([fetch('/api/status').then(r=>r.json()),fetch('/api/requests').then(r=>r.json())])"
         ".then(function(d){fetching=false;lastOk=Date.now();"
-        "var r=parseInt(d[0]);document.getElementById('sig').textContent=r?r+' dBm ('+sigQ(r)+')':'-';"
+        "var st=d[0];document.getElementById('sig').textContent=st.wifi.rssi?st.wifi.rssi+' dBm ('+sigQ(st.wifi.rssi)+')':'-';"
+        "document.getElementById('cpu').textContent=st.cpu+'%';"
         "var req=d[1];document.getElementById('avgttfb').textContent=req.avg_ttfb;"
         "var h='';req.requests.forEach(function(e){"
         "var c=e.ok?'#22c55e':'#ef4444';"
@@ -861,15 +870,16 @@ static esp_err_t api_status_handler(httpd_req_t *req)
         check_powerwall_connectivity();
     }
 
-    char response[256];
+    char response[300];
     snprintf(response, sizeof(response),
         "{\"wifi\":{\"connected\":%s,\"ssid\":\"%s\",\"rssi\":%d},"
         "\"powerwall\":{\"reachable\":%s,\"ip\":\"%s\"},"
-        "\"heap\":%lu}",
+        "\"cpu\":%u,\"heap\":%lu}",
         wifi_connected ? "true" : "false",
         wifi_ssid, rssi,
         powerwall_reachable ? "true" : "false",
         POWERWALL_IP_STR,
+        cpu_usage_percent,
         (unsigned long)esp_get_free_heap_size());
 
     httpd_resp_set_type(req, "application/json");
@@ -1330,33 +1340,79 @@ static void wifi_quality_monitor_task(void *pvParameters)
     }
 }
 
-/** System monitoring task - periodically logs system metrics */
+/** System monitoring task - periodically logs system metrics and calculates CPU usage */
 static void system_monitor_task(void *pvParameters)
 {
     ESP_LOGI(TAG, "System monitoring started (interval: %d seconds)", SYSTEM_MONITOR_INTERVAL_SEC);
-    
+
+    // For CPU usage calculation - track idle task runtime
+    #if configGENERATE_RUN_TIME_STATS
+    TaskHandle_t idle_task_0 = xTaskGetIdleTaskHandleForCore(0);
+    TaskHandle_t idle_task_1 = xTaskGetIdleTaskHandleForCore(1);
+    uint32_t prev_idle_0 = 0, prev_idle_1 = 0;
+    int64_t prev_time_us = 0;
+    TaskStatus_t task_status;
+    #endif
+
     while (1) {
         // Wait for the configured interval
         vTaskDelay(pdMS_TO_TICKS(SYSTEM_MONITOR_INTERVAL_SEC * 1000));
-        
+
+        // Calculate CPU usage from idle task runtime
+        #if configGENERATE_RUN_TIME_STATS
+        uint32_t idle_runtime_0 = 0, idle_runtime_1 = 0;
+
+        // Get idle task runtimes (in microseconds when using ESP_TIMER)
+        if (idle_task_0) {
+            vTaskGetInfo(idle_task_0, &task_status, pdFALSE, eRunning);
+            idle_runtime_0 = task_status.ulRunTimeCounter;
+        }
+        if (idle_task_1) {
+            vTaskGetInfo(idle_task_1, &task_status, pdFALSE, eRunning);
+            idle_runtime_1 = task_status.ulRunTimeCounter;
+        }
+
+        // Get current time in microseconds (same unit as runtime counters)
+        int64_t current_time_us = esp_timer_get_time();
+
+        if (prev_time_us > 0) {
+            // Delta time in microseconds for this interval
+            int64_t delta_time_us = current_time_us - prev_time_us;
+            // Total available CPU time = delta * 2 cores (in microseconds)
+            int64_t total_cpu_time_us = delta_time_us * 2;
+            // Delta idle time (both cores combined)
+            uint32_t delta_idle = (idle_runtime_0 - prev_idle_0) + (idle_runtime_1 - prev_idle_1);
+
+            if (total_cpu_time_us > 0) {
+                // CPU usage = 100 - idle_percentage
+                int64_t idle_pct = (delta_idle * 100LL) / total_cpu_time_us;
+                cpu_usage_percent = (idle_pct > 100) ? 0 : (uint8_t)(100 - idle_pct);
+            }
+        }
+
+        prev_idle_0 = idle_runtime_0;
+        prev_idle_1 = idle_runtime_1;
+        prev_time_us = current_time_us;
+        #endif
+
         // Get free heap size
         uint32_t free_heap = esp_get_free_heap_size();
         uint32_t min_free_heap = esp_get_minimum_free_heap_size();
-        
+
         // Log system status
-        ESP_LOGI(TAG, "System Status - Free Heap: %lu bytes, Min Free: %lu bytes", 
-                 (unsigned long)free_heap, 
-                 (unsigned long)min_free_heap);
-        
-        // Provide heap health interpretation
+        #if configGENERATE_RUN_TIME_STATS
+        ESP_LOGI(TAG, "System Status - CPU: %u%%, Heap: %lu KB free, Min: %lu KB",
+                 cpu_usage_percent, (unsigned long)(free_heap / 1024),
+                 (unsigned long)(min_free_heap / 1024));
+        #else
+        ESP_LOGI(TAG, "System Status - Heap: %lu KB free, Min: %lu KB",
+                 (unsigned long)(free_heap / 1024),
+                 (unsigned long)(min_free_heap / 1024));
+        #endif
+
+        // Warn on low heap
         if (free_heap < 20000) {
             ESP_LOGW(TAG, "Heap Status: Critical - Low memory!");
-        } else if (free_heap < 50000) {
-            ESP_LOGW(TAG, "Heap Status: Warning - Limited memory");
-        } else if (free_heap < 100000) {
-            ESP_LOGI(TAG, "Heap Status: Fair");
-        } else {
-            ESP_LOGI(TAG, "Heap Status: Good");
         }
     }
 }
