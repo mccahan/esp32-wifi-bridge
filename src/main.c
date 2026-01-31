@@ -14,6 +14,7 @@
 #include "freertos/event_groups.h"
 #include "freertos/semphr.h"
 #include "esp_system.h"
+#include "esp_mac.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_log.h"
@@ -486,10 +487,15 @@ static esp_err_t init_ethernet(void)
     esp_eth_config_t config = ETH_DEFAULT_CONFIG(mac, phy);
     ESP_ERROR_CHECK(esp_eth_driver_install(&config, &eth_handle));
 
-    // Set custom MAC address (W5500 doesn't have burned-in MAC)
-    uint8_t mac_addr[6] = ETH_MAC_ADDR;
+    // Clone MAC address from the built-in WiFi interface
+    // W5500 doesn't have a burned-in MAC, so we derive one from the chip's base MAC
+    uint8_t mac_addr[6];
+    ESP_ERROR_CHECK(esp_read_mac(mac_addr, ESP_MAC_WIFI_STA));
+    // Modify locally-administered bit to indicate this is a derived address
+    // This ensures the Ethernet MAC is unique but related to the WiFi MAC
+    mac_addr[0] = (mac_addr[0] | 0x02) & 0xFE;  // Set local bit, clear multicast bit
     ESP_ERROR_CHECK(esp_eth_ioctl(eth_handle, ETH_CMD_S_MAC_ADDR, mac_addr));
-    ESP_LOGI(TAG, "MAC Address set to: %02x:%02x:%02x:%02x:%02x:%02x",
+    ESP_LOGI(TAG, "Ethernet MAC (derived from WiFi): %02x:%02x:%02x:%02x:%02x:%02x",
              mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5]);
 
     // Attach Ethernet driver to TCP/IP stack
