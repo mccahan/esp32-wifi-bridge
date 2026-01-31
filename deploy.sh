@@ -202,7 +202,7 @@ is_device_compatible() {
     local target="$2"
     local ota_port="$3"
 
-    [[ -n "$wifi_ssid" ]] && [[ -n "$target" ]] && [[ -n "$ota_port" ]]
+    [[ -n "$ota_port" ]]
 }
 
 # Let user select a device if multiple are found
@@ -227,7 +227,7 @@ select_device() {
             return 0
         else
             print_error "Found device ${hostname}.local (${ip}) but it is incompatible"
-            print_error "Missing required TXT records (wifi_ssid, target, ota_port)"
+            print_error "Missing required TXT record (ota_port)"
             print_error "Update the device firmware first using: pio run -t upload"
             return 1
         fi
@@ -348,19 +348,25 @@ deploy_firmware() {
     print_status "Current device status:"
     curl -s "http://${ip}:${OTA_PORT}/" | grep -oE 'Version:</td><td[^>]*>[^<]+' | sed 's/.*>/  Version: /' || true
 
-    # Upload firmware
-    print_status "Uploading firmware (this may take a moment)..."
+    # Upload firmware with progress bar
+    local fw_size=$(stat -f%z "$FIRMWARE_PATH" 2>/dev/null || stat -c%s "$FIRMWARE_PATH" 2>/dev/null)
+    print_status "Uploading firmware ($(numfmt --to=iec-i --suffix=B $fw_size 2>/dev/null || echo "$fw_size bytes"))..."
 
     local response
-    response=$(curl -s -w "\n%{http_code}" \
+    local http_code
+    local tmpfile=$(mktemp)
+
+    # Use --progress-bar for visual feedback, capture response to temp file
+    curl --progress-bar -w "\n%{http_code}" \
         --connect-timeout 10 \
         --max-time 120 \
         -X POST \
         -F "firmware=@${FIRMWARE_PATH}" \
-        "${url}" 2>&1)
+        "${url}" > "$tmpfile" 2>&1
 
-    local http_code=$(echo "$response" | tail -1)
-    local body=$(echo "$response" | sed '$d')
+    http_code=$(tail -1 "$tmpfile")
+    local body=$(sed '$d' "$tmpfile")
+    rm -f "$tmpfile"
 
     if [[ "$http_code" == "200" ]] || echo "$body" | grep -qi "success"; then
         print_success "Firmware uploaded successfully!"
@@ -426,7 +432,7 @@ main() {
 
                 if [[ -z "$compatible_ips" ]]; then
                     print_error "No compatible devices found"
-                    print_error "Devices must have wifi_ssid, target, and ota_port TXT records"
+                    print_error "Devices must have ota_port TXT record"
                     exit 1
                 fi
 

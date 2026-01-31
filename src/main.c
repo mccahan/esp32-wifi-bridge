@@ -540,6 +540,10 @@ static esp_err_t wifi_scan_handler(httpd_req_t *req)
 {
     ESP_LOGI(TAG, "Starting WiFi scan...");
 
+    // Disconnect first - scanning not allowed while connecting
+    esp_wifi_disconnect();
+    vTaskDelay(pdMS_TO_TICKS(100));  // Brief delay for disconnect to complete
+
     // Configure scan
     wifi_scan_config_t scan_config = {
         .ssid = NULL,
@@ -554,6 +558,8 @@ static esp_err_t wifi_scan_handler(httpd_req_t *req)
     esp_err_t err = esp_wifi_scan_start(&scan_config, true);  // Blocking scan
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "WiFi scan failed: %s", esp_err_to_name(err));
+        // Try to reconnect even if scan failed
+        esp_wifi_connect();
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Scan failed");
         return ESP_FAIL;
     }
@@ -588,6 +594,9 @@ static esp_err_t wifi_scan_handler(httpd_req_t *req)
     httpd_resp_sendstr_chunk(req, NULL);
 
     if (ap_list) free(ap_list);
+
+    // Reconnect to WiFi after scan
+    esp_wifi_connect();
 
     ESP_LOGI(TAG, "WiFi scan complete: %d networks found", ap_count);
     return ESP_OK;
@@ -1395,6 +1404,37 @@ static void tcp_server_task(void *pvParameters)
     vTaskDelete(NULL);
 }
 
+/** Task to initialize WiFi-dependent services after connection */
+static void wifi_services_task(void *pvParameters)
+{
+    // Wait for WiFi connection (with timeout for logging)
+    ESP_LOGI(TAG, "Waiting for WiFi connection to %s...", wifi_ssid);
+
+    while (1) {
+        EventBits_t bits = xEventGroupWaitBits(s_event_group, WIFI_CONNECTED_BIT,
+                                                false, true, pdMS_TO_TICKS(30000));
+        if (bits & WIFI_CONNECTED_BIT) {
+            break;
+        }
+        ESP_LOGW(TAG, "WiFi not connected yet - check credentials via OTA UI at http://<eth-ip>:%d/", OTA_HTTP_PORT);
+    }
+
+    ESP_LOGI(TAG, "WiFi connected - starting proxy services");
+
+    // Initialize buffer pool for proxy connections
+    init_buffer_pool();
+
+    // Start WiFi quality monitoring task
+    xTaskCreate(wifi_quality_monitor_task, "wifi_monitor", 3072, NULL, 3, NULL);
+
+    // Start TCP server task (proxy)
+    xTaskCreate(tcp_server_task, "tcp_server", 4096, NULL, 5, NULL);
+
+    ESP_LOGI(TAG, "Proxy services started - forwarding to %s:443", POWERWALL_IP_STR);
+
+    vTaskDelete(NULL);
+}
+
 void app_main(void)
 {
     ESP_LOGI(TAG, "=== ESP32-S3-POE-ETH WiFi-Ethernet SSL Bridge ===");
@@ -1413,38 +1453,33 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(ret);
 
-    // Initialize Ethernet
+    // Initialize Ethernet first (OTA server runs on Ethernet)
     ESP_ERROR_CHECK(init_ethernet());
 
-    // Initialize WiFi
+    // Initialize WiFi (starts connection attempt in background)
     ESP_ERROR_CHECK(init_wifi());
 
-    // Wait for WiFi connection
-    ESP_LOGI(TAG, "Waiting for WiFi connection...");
-    xEventGroupWaitBits(s_event_group, WIFI_CONNECTED_BIT, false, true, portMAX_DELAY);
+    // Wait for Ethernet to get IP before starting OTA server
+    ESP_LOGI(TAG, "Waiting for Ethernet IP...");
+    xEventGroupWaitBits(s_event_group, ETH_GOT_IP_BIT, false, true, portMAX_DELAY);
 
-    // Initialize mDNS
+    // Start OTA HTTP server immediately (on Ethernet interface)
+    // This allows WiFi config even if WiFi credentials are wrong
+    start_ota_server();
+    ESP_LOGI(TAG, "OTA server started - http://<eth-ip>:%d/", OTA_HTTP_PORT);
+
+    // Initialize mDNS on Ethernet (for device discovery, doesn't need WiFi)
     init_mdns();
 
-    // Initialize buffer pool for proxy connections
-    init_buffer_pool();
-
-    // Start WiFi quality monitoring task (increased stack size for logging)
-    xTaskCreate(wifi_quality_monitor_task, "wifi_monitor", 3072, NULL, 3, NULL);
-
-    // Start system monitoring task (CPU load, memory)
-    xTaskCreate(system_monitor_task, "sys_monitor", 3072, NULL, 3, NULL);
-
-    // Start TCP server task
-    xTaskCreate(tcp_server_task, "tcp_server", 4096, NULL, 5, NULL);
-
-    // Start OTA HTTP server (on Ethernet interface)
-    start_ota_server();
-
-    // Validate OTA image after successful network initialization
-    // This marks the firmware as valid, preventing automatic rollback
-    // If the device crashes before this point, bootloader will rollback
+    // Validate OTA image early so device doesn't rollback while user configures WiFi
     validate_ota_image();
 
-    ESP_LOGI(TAG, "System fully initialized - OTA available at http://<eth-ip>:%d/", OTA_HTTP_PORT);
+    // Start system monitoring task
+    xTaskCreate(system_monitor_task, "sys_monitor", 3072, NULL, 3, NULL);
+
+    // Start WiFi-dependent services in background task
+    // This allows OTA to remain responsive while waiting for WiFi
+    xTaskCreate(wifi_services_task, "wifi_services", 4096, NULL, 4, NULL);
+
+    ESP_LOGI(TAG, "System initialized - configure WiFi via OTA UI if needed");
 }
