@@ -51,38 +51,54 @@ static char wifi_password[65] = WIFI_PASSWORD;
 static volatile bool powerwall_reachable = false;
 static volatile int64_t last_powerwall_check = 0;
 
-// ===== Connection Log =====
-#define CONNECTION_LOG_SIZE 5
+// ===== Request Log =====
+// Tracks individual request/response exchanges through the proxy
+#define REQUEST_LOG_SIZE 10
 
 typedef struct {
-    int64_t timestamp;      // Unix-like timestamp (seconds since boot)
-    uint32_t bytes_in;      // Bytes received from client
-    uint32_t bytes_out;     // Bytes sent to client
+    int64_t timestamp;      // Seconds since boot
     uint32_t source_ip;     // Source IP (network byte order)
-    uint16_t duration_ms;   // Connection duration in ms
+    uint32_t bytes_in;      // Request bytes (client -> powerwall)
+    uint32_t bytes_out;     // Response bytes (powerwall -> client)
+    uint16_t ttfb_ms;       // Time to first byte from Powerwall
     uint8_t result;         // 0=success, 1=timeout, 2=error
-    bool valid;             // Entry is valid
-} connection_log_entry_t;
+    bool valid;
+} request_log_entry_t;
 
-static connection_log_entry_t connection_log[CONNECTION_LOG_SIZE];
-static int connection_log_index = 0;
-static SemaphoreHandle_t connection_log_mutex = NULL;
+static request_log_entry_t request_log[REQUEST_LOG_SIZE];
+static int request_log_index = 0;
+static SemaphoreHandle_t request_log_mutex = NULL;
 
-/** Log a completed connection */
-static void log_connection(uint32_t source_ip, uint32_t bytes_in, uint32_t bytes_out, uint16_t duration_ms, uint8_t result)
+// Running average TTFB (exponential moving average)
+static uint32_t avg_ttfb_ms = 0;
+static uint32_t ttfb_sample_count = 0;
+
+/** Log a completed request/response exchange */
+static void log_request(uint32_t source_ip, uint32_t bytes_in, uint32_t bytes_out, uint16_t ttfb_ms, uint8_t result)
 {
-    if (!connection_log_mutex) return;
-    if (xSemaphoreTake(connection_log_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-        connection_log_entry_t *entry = &connection_log[connection_log_index];
-        entry->timestamp = esp_timer_get_time() / 1000000;  // Seconds since boot
+    if (!request_log_mutex) return;
+    if (xSemaphoreTake(request_log_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        request_log_entry_t *entry = &request_log[request_log_index];
+        entry->timestamp = esp_timer_get_time() / 1000000;
         entry->source_ip = source_ip;
         entry->bytes_in = bytes_in;
         entry->bytes_out = bytes_out;
-        entry->duration_ms = duration_ms;
+        entry->ttfb_ms = ttfb_ms;
         entry->result = result;
         entry->valid = true;
-        connection_log_index = (connection_log_index + 1) % CONNECTION_LOG_SIZE;
-        xSemaphoreGive(connection_log_mutex);
+        request_log_index = (request_log_index + 1) % REQUEST_LOG_SIZE;
+
+        // Update running average TTFB (exponential moving average, alpha=0.2)
+        if (result == 0 && ttfb_ms > 0) {
+            if (ttfb_sample_count == 0) {
+                avg_ttfb_ms = ttfb_ms;
+            } else {
+                avg_ttfb_ms = (avg_ttfb_ms * 4 + ttfb_ms) / 5;
+            }
+            ttfb_sample_count++;
+        }
+
+        xSemaphoreGive(request_log_mutex);
     }
 }
 
@@ -118,12 +134,12 @@ static SemaphoreHandle_t buffer_pool_mutex = NULL;
 static void init_buffer_pool(void)
 {
     buffer_pool_mutex = xSemaphoreCreateMutex();
-    connection_log_mutex = xSemaphoreCreateMutex();
+    request_log_mutex = xSemaphoreCreateMutex();
     for (int i = 0; i < MAX_CONCURRENT_CLIENTS; i++) {
         buffer_pool[i].in_use = false;
     }
-    for (int i = 0; i < CONNECTION_LOG_SIZE; i++) {
-        connection_log[i].valid = false;
+    for (int i = 0; i < REQUEST_LOG_SIZE; i++) {
+        request_log[i].valid = false;
     }
     ESP_LOGI(TAG, "Buffer pool initialized: %d slots, %d bytes each",
              MAX_CONCURRENT_CLIENTS, PROXY_BUFFER_SIZE * 2);
@@ -274,6 +290,24 @@ static void check_powerwall_connectivity(void)
 
 // ===== OTA Update Handlers =====
 
+// Simple inline SVG icons (no external fonts needed)
+#define ICON_WIFI "<svg class=\"i\" viewBox=\"0 0 24 24\"><path d=\"M1 9l2 2c4.97-4.97 13.03-4.97 18 0l2-2C16.93 2.93 7.08 2.93 1 9zm8 8l3 3 3-3c-1.65-1.66-4.34-1.66-6 0zm-4-4l2 2c2.76-2.76 7.24-2.76 10 0l2-2C15.14 9.14 8.87 9.14 5 13z\"/></svg>"
+#define ICON_SIGNAL "<svg class=\"i\" viewBox=\"0 0 24 24\"><path d=\"M2 22h20V2L2 22z\"/></svg>"
+#define ICON_BATTERY "<svg class=\"i\" viewBox=\"0 0 24 24\"><path d=\"M16 4h-2V2h-4v2H8C6.9 4 6 4.9 6 6v14c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 16H8V6h8v14z\"/></svg>"
+#define ICON_DNS "<svg class=\"i\" viewBox=\"0 0 24 24\"><circle cx=\"12\" cy=\"12\" r=\"10\"/><circle cx=\"12\" cy=\"12\" r=\"3\" fill=\"#1e293b\"/></svg>"
+#define ICON_SETTINGS "<svg class=\"i\" viewBox=\"0 0 24 24\"><path d=\"M12 8a4 4 0 100 8 4 4 0 000-8zm8.94 3A8.99 8.99 0 0013 3.06V1h-2v2.06A8.99 8.99 0 003.06 11H1v2h2.06A8.99 8.99 0 0011 20.94V23h2v-2.06A8.99 8.99 0 0020.94 13H23v-2h-2.06z\"/></svg>"
+#define ICON_SEARCH "<svg class=\"i\" viewBox=\"0 0 24 24\"><circle cx=\"10\" cy=\"10\" r=\"7\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\"/><path d=\"M15 15l6 6\" stroke=\"currentColor\" stroke-width=\"2\"/></svg>"
+#define ICON_SAVE "<svg class=\"i\" viewBox=\"0 0 24 24\"><path d=\"M17 3H5a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2V7l-4-4zm-5 16a3 3 0 110-6 3 3 0 010 6zm3-10H5V5h10v4z\"/></svg>"
+#define ICON_MEMORY "<svg class=\"i\" viewBox=\"0 0 24 24\"><rect x=\"4\" y=\"4\" width=\"16\" height=\"16\" rx=\"2\"/><rect x=\"8\" y=\"8\" width=\"8\" height=\"8\" fill=\"#1e293b\"/></svg>"
+#define ICON_LAN "<svg class=\"i\" viewBox=\"0 0 24 24\"><path d=\"M3 3l18 9-18 9V3z\"/></svg>"
+#define ICON_SWAP "<svg class=\"i\" viewBox=\"0 0 24 24\"><path d=\"M6 9l-4 4 4 4v-3h8v-2H6V9zm12 6l4-4-4-4v3H10v2h8v3z\"/></svg>"
+#define ICON_UPDATE "<svg class=\"i\" viewBox=\"0 0 24 24\"><path d=\"M12 4V1L8 5l4 4V6a6 6 0 11-6 6H4a8 8 0 108-8z\"/></svg>"
+#define ICON_UPLOAD "<svg class=\"i\" viewBox=\"0 0 24 24\"><path d=\"M9 16h6v-6h4l-7-7-7 7h4v6zm-4 2h14v2H5v-2z\"/></svg>"
+#define ICON_HISTORY "<svg class=\"i\" viewBox=\"0 0 24 24\"><path d=\"M12 4a8 8 0 00-8 8H1l4 4 4-4H6a6 6 0 116 6v2a8 8 0 000-16zm-1 5v4l3 2 1-1-2.5-1.5V9h-1.5z\"/></svg>"
+#define ICON_WARN "<svg class=\"i\" viewBox=\"0 0 24 24\"><path d=\"M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z\"/></svg>"
+#define ICON_EXPAND "<svg class=\"i\" style=\"width:.6rem;height:.6rem\" viewBox=\"0 0 24 24\"><path d=\"M7 10l5 5 5-5H7z\"/></svg>"
+#define ICON_ROUTER "<svg class=\"i\" viewBox=\"0 0 24 24\"><rect x=\"3\" y=\"13\" width=\"18\" height=\"8\" rx=\"2\"/><circle cx=\"7\" cy=\"17\" r=\"1.5\"/><circle cx=\"12\" cy=\"17\" r=\"1.5\"/><path d=\"M12 3v7M8 6l4-3 4 3\"/></svg>"
+
 // Dark mode CSS (Tailwind-inspired)
 static const char *DARK_CSS =
     "*{box-sizing:border-box;margin:0;padding:0}"
@@ -345,31 +379,39 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
         "<!DOCTYPE html><html><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
         "<title>ESP32 WiFi Bridge</title><style>");
     httpd_resp_sendstr_chunk(req, DARK_CSS);
-    httpd_resp_sendstr_chunk(req, "</style></head><body><div class=\"container\">");
+    httpd_resp_sendstr_chunk(req,
+        "svg.i{width:1.125rem;height:1.125rem;vertical-align:middle;margin-right:0.25rem;fill:currentColor}"
+        "</style></head><body><div class=\"container\">");
 
     char buf[512];
 
     // Status card - header
-    httpd_resp_sendstr_chunk(req, "<div class=\"card\"><h1>ESP32 WiFi Bridge</h1><div class=\"grid\">");
+    httpd_resp_sendstr_chunk(req, "<div class=\"card\"><h1>" ICON_ROUTER " ESP32 WiFi Bridge</h1><div class=\"grid\">");
 
     // WiFi status (clickable to show/hide WiFi config)
-    snprintf(buf, sizeof(buf),
+    httpd_resp_sendstr_chunk(req,
         "<div class=\"status-item\" style=\"cursor:pointer\" onclick=\"document.getElementById('wificfg').style.display=document.getElementById('wificfg').style.display==='none'?'block':'none'\">"
-        "<div class=\"label\">WiFi Status <span style=\"font-size:0.6rem\">&#9660;</span></div>"
+        "<div class=\"label\">" ICON_WIFI " WiFi " ICON_EXPAND "</div>");
+    snprintf(buf, sizeof(buf),
         "<div class=\"value\"><span class=\"status-dot %s\"></span>%s</div></div>",
         wifi_connected ? "status-ok" : "status-err",
         wifi_connected ? "Connected" : "Disconnected");
     httpd_resp_sendstr_chunk(req, buf);
 
     // Signal strength
-    snprintf(buf, sizeof(buf),
-        "<div class=\"status-item\"><div class=\"label\">Signal</div><div class=\"value\">%s</div></div>",
-        wifi_connected ? (rssi > -50 ? "Excellent" : rssi > -60 ? "Good" : rssi > -70 ? "Fair" : "Weak") : "-");
+    if (wifi_connected) {
+        snprintf(buf, sizeof(buf),
+            "<div class=\"status-item\"><div class=\"label\">" ICON_SIGNAL " Signal</div><div class=\"value\">%d dBm (%s)</div></div>",
+            rssi, rssi > -50 ? "Excellent" : rssi > -60 ? "Good" : rssi > -70 ? "Fair" : "Weak");
+    } else {
+        snprintf(buf, sizeof(buf),
+            "<div class=\"status-item\"><div class=\"label\">" ICON_SIGNAL " Signal</div><div class=\"value\">-</div></div>");
+    }
     httpd_resp_sendstr_chunk(req, buf);
 
     // Powerwall status
     snprintf(buf, sizeof(buf),
-        "<div class=\"status-item\"><div class=\"label\">Powerwall</div>"
+        "<div class=\"status-item\"><div class=\"label\">" ICON_BATTERY " Powerwall</div>"
         "<div class=\"value\"><span class=\"status-dot %s\"></span>%s</div></div>",
         powerwall_reachable ? "status-ok" : "status-err",
         powerwall_reachable ? "Reachable" : "Unreachable");
@@ -377,13 +419,13 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
 
     // Target IP
     snprintf(buf, sizeof(buf),
-        "<div class=\"status-item\"><div class=\"label\">Target IP</div><div class=\"value\">%s</div></div>"
+        "<div class=\"status-item\"><div class=\"label\">" ICON_DNS " Target</div><div class=\"value\">%s</div></div>"
         "</div></div>", POWERWALL_IP_STR);
     httpd_resp_sendstr_chunk(req, buf);
 
     // WiFi Configuration card (hidden by default, toggle via WiFi Status click)
     httpd_resp_sendstr_chunk(req,
-        "<div class=\"card\" id=\"wificfg\" style=\"display:none\"><h2>WiFi Configuration</h2>"
+        "<div class=\"card\" id=\"wificfg\" style=\"display:none\"><h2>" ICON_SETTINGS " WiFi Configuration</h2>"
         "<form method=\"POST\" action=\"/wifi/save\">"
         "<div class=\"form-group\"><label class=\"label\">Network SSID</label>");
 
@@ -393,7 +435,7 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
 
     httpd_resp_sendstr_chunk(req,
         "<div class=\"flex mt-1\">"
-        "<button type=\"button\" class=\"btn btn-secondary\" onclick=\"scanWifi()\">Scan Networks</button>"
+        "<button type=\"button\" class=\"btn btn-secondary\" onclick=\"scanWifi()\">" ICON_SEARCH " Scan</button>"
         "<select id=\"wl\" style=\"display:none;flex:1\" onchange=\"document.getElementById('ssid').value=this.value\"></select>"
         "</div></div>");
 
@@ -402,33 +444,38 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
         "<input type=\"password\" name=\"password\" placeholder=\"Enter password\" class=\"mt-1\"></div>");
 
     snprintf(buf, sizeof(buf),
-        "<div class=\"text-xs text-muted\" style=\"margin-bottom:0.75rem\">Current network: %s</div>"
-        "<button type=\"submit\" class=\"btn btn-primary\">Save &amp; Reconnect</button>"
+        "<div class=\"text-xs text-muted\" style=\"margin-bottom:0.75rem\">Current: %s</div>"
+        "<button type=\"submit\" class=\"btn btn-primary\">" ICON_SAVE " Save &amp; Reconnect</button>"
         "</form></div>", wifi_ssid);
     httpd_resp_sendstr_chunk(req, buf);
 
     // System info card
+    httpd_resp_sendstr_chunk(req, "<div class=\"card\"><h2>" ICON_MEMORY " System</h2><div class=\"grid\">");
     snprintf(buf, sizeof(buf),
-        "<div class=\"card\"><h2>System</h2>"
-        "<div class=\"grid\">"
         "<div class=\"status-item\"><div class=\"label\">WiFi IP</div><div class=\"value\">%s</div></div>"
-        "<div class=\"status-item\"><div class=\"label\">Free Heap</div><div class=\"value\">%lu KB</div></div>"
-        "</div></div>",
+        "<div class=\"status-item\"><div class=\"label\">Heap</div><div class=\"value\">%lu KB</div></div></div>",
         ip_str, (unsigned long)(esp_get_free_heap_size() / 1024));
     httpd_resp_sendstr_chunk(req, buf);
-
-    // Recent connections card
     httpd_resp_sendstr_chunk(req,
-        "<div class=\"card\"><h2>Recent Connections</h2>"
-        "<table style=\"width:100%;font-size:0.875rem\">"
-        "<tr style=\"color:#94a3b8\"><td>Time</td><td>Source</td><td>In/Out</td><td>Dur</td><td>Status</td></tr>");
+        "<hr><form id=\"rebootform\" method=\"POST\" action=\"/reboot\">"
+        "<button type=\"button\" class=\"btn btn-secondary\" onclick=\"if(confirm('Reboot device?'))document.getElementById('rebootform').submit()\">"
+        ICON_UPDATE " Reboot</button></form></div>");
 
-    if (connection_log_mutex && xSemaphoreTake(connection_log_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+    // Recent requests card with TTFB
+    snprintf(buf, sizeof(buf),
+        "<div class=\"card\"><h2>" ICON_SWAP " Recent Requests</h2>"
+        "<div class=\"text-sm text-muted\" style=\"margin-bottom:0.5rem\">Avg TTFB: %lu ms</div>"
+        "<table style=\"width:100%%;font-size:0.875rem\">"
+        "<tr style=\"color:#94a3b8\"><td>Age</td><td>Source</td><td>Req/Resp</td><td>TTFB</td><td>Status</td></tr>",
+        (unsigned long)avg_ttfb_ms);
+    httpd_resp_sendstr_chunk(req, buf);
+
+    if (request_log_mutex && xSemaphoreTake(request_log_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
         int64_t now = esp_timer_get_time() / 1000000;
-        for (int i = 0; i < CONNECTION_LOG_SIZE; i++) {
+        for (int i = 0; i < REQUEST_LOG_SIZE; i++) {
             // Read in reverse order (most recent first)
-            int idx = (connection_log_index - 1 - i + CONNECTION_LOG_SIZE) % CONNECTION_LOG_SIZE;
-            connection_log_entry_t *e = &connection_log[idx];
+            int idx = (request_log_index - 1 - i + REQUEST_LOG_SIZE) % REQUEST_LOG_SIZE;
+            request_log_entry_t *e = &request_log[idx];
             if (!e->valid) continue;
 
             int64_t age = now - e->timestamp;
@@ -447,24 +494,27 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
                 (long long)age, age_unit,
                 ip[0], ip[1], ip[2], ip[3],
                 (unsigned long)e->bytes_in, (unsigned long)e->bytes_out,
-                e->duration_ms, color, status);
+                e->ttfb_ms, color, status);
             httpd_resp_sendstr_chunk(req, buf);
         }
-        xSemaphoreGive(connection_log_mutex);
+        xSemaphoreGive(request_log_mutex);
     }
 
     httpd_resp_sendstr_chunk(req, "</table></div>");
 
     // Firmware card (at bottom)
+    httpd_resp_sendstr_chunk(req,
+        "<div class=\"card\"><h2>" ICON_UPDATE " Firmware</h2><div class=\"grid\">");
+
     snprintf(buf, sizeof(buf),
-        "<div class=\"card\"><h2>Firmware</h2>"
-        "<div class=\"grid\">"
         "<div class=\"status-item\"><div class=\"label\">Version</div><div class=\"value\">%s</div></div>"
-        "<div class=\"status-item\"><div class=\"label\">Built</div><div class=\"value text-sm\">%s</div></div>"
+        "<div class=\"status-item\"><div class=\"label\">Built</div><div class=\"value text-sm\">%s</div></div>",
+        app_desc->version, app_desc->date);
+    httpd_resp_sendstr_chunk(req, buf);
+
+    snprintf(buf, sizeof(buf),
         "<div class=\"status-item\"><div class=\"label\">Partition</div><div class=\"value\">%s</div></div>"
-        "<div class=\"status-item\"><div class=\"label\">State</div><div class=\"value\">%s</div></div>"
-        "</div><hr>",
-        app_desc->version, app_desc->date,
+        "<div class=\"status-item\"><div class=\"label\">State</div><div class=\"value\">%s</div></div></div><hr>",
         running->label,
         ota_state == ESP_OTA_IMG_VALID ? "Valid" :
         ota_state == ESP_OTA_IMG_PENDING_VERIFY ? "Pending" : "New");
@@ -473,13 +523,13 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
     // OTA upload form
     httpd_resp_sendstr_chunk(req,
         "<form method=\"POST\" action=\"/ota/upload\" enctype=\"multipart/form-data\">"
-        "<div class=\"form-group\"><label class=\"label\">Upload Firmware (.bin)</label>"
+        "<div class=\"form-group\"><label class=\"label\">" ICON_UPLOAD " Upload Firmware (.bin)</label>"
         "<input type=\"file\" name=\"firmware\" accept=\".bin\" class=\"mt-1\"></div>"
-        "<div class=\"flex\"><button type=\"submit\" class=\"btn btn-primary\">Upload &amp; Update</button>");
+        "<div class=\"flex\"><button type=\"submit\" class=\"btn btn-primary\">" ICON_UPLOAD " Upload</button>");
     httpd_resp_sendstr_chunk(req,
-        "<button type=\"button\" class=\"btn btn-danger\" onclick=\"if(confirm('Rollback?'))document.getElementById('rb').submit()\">Rollback</button></div>"
+        "<button type=\"button\" class=\"btn btn-danger\" onclick=\"if(confirm('Rollback?'))document.getElementById('rb').submit()\">" ICON_HISTORY " Rollback</button></div>"
         "</form><form id=\"rb\" method=\"POST\" action=\"/ota/rollback\"></form>"
-        "<div class=\"alert alert-warn mt-2\">Device will reboot after update</div></div>");
+        "<div class=\"alert alert-warn mt-2\">" ICON_WARN " Device will reboot after update</div></div>");
 
     // JavaScript for WiFi scanning
     httpd_resp_sendstr_chunk(req,
@@ -806,6 +856,53 @@ static esp_err_t api_status_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+/** API endpoint for RSSI value only */
+static esp_err_t api_rssi_handler(httpd_req_t *req)
+{
+    EventBits_t bits = xEventGroupGetBits(s_event_group);
+    bool wifi_connected = (bits & WIFI_CONNECTED_BIT) != 0;
+
+    int rssi = 0;
+    if (wifi_connected) {
+        wifi_ap_record_t ap_info = {0};
+        if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) {
+            rssi = ap_info.rssi;
+        }
+    }
+
+    char response[16];
+    snprintf(response, sizeof(response), "%d", rssi);
+
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_send(req, response, strlen(response));
+    return ESP_OK;
+}
+
+/** Reboot handler */
+static esp_err_t reboot_handler(httpd_req_t *req)
+{
+    ESP_LOGW(TAG, "Manual reboot requested");
+
+    const char *response = "<!DOCTYPE html><html><head><title>Reboot</title>"
+        "<meta http-equiv='refresh' content='10;url=/'>"
+        "<style>body{font-family:system-ui;background:#0f172a;color:#e2e8f0;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}"
+        ".box{background:#1e293b;padding:2rem;border-radius:0.75rem;text-align:center;border:1px solid #334155}"
+        ".spinner{width:3rem;height:3rem;border:3px solid #334155;border-top:3px solid #3b82f6;border-radius:50%;animation:spin 1s linear infinite;margin:1rem auto}"
+        "@keyframes spin{to{transform:rotate(360deg)}}</style></head>"
+        "<body><div class=\"box\"><div class=\"spinner\"></div>"
+        "<h2>Rebooting...</h2>"
+        "<p>Device is restarting. Page will refresh automatically.</p>"
+        "</div></body></html>";
+
+    httpd_resp_set_type(req, "text/html");
+    httpd_resp_send(req, response, strlen(response));
+
+    vTaskDelay(pdMS_TO_TICKS(500));
+    esp_restart();
+
+    return ESP_OK;
+}
+
 /** Manual rollback handler */
 static esp_err_t ota_rollback_handler(httpd_req_t *req)
 {
@@ -844,7 +941,7 @@ static esp_err_t start_ota_server(void)
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = OTA_HTTP_PORT;
     config.stack_size = 8192;
-    config.max_uri_handlers = 8;
+    config.max_uri_handlers = 10;
 
     esp_err_t err = httpd_start(&ota_server, &config);
     if (err != ESP_OK) {
@@ -874,6 +971,13 @@ static esp_err_t start_ota_server(void)
     };
     httpd_register_uri_handler(ota_server, &ota_rollback);
 
+    httpd_uri_t reboot = {
+        .uri = "/reboot",
+        .method = HTTP_POST,
+        .handler = reboot_handler,
+    };
+    httpd_register_uri_handler(ota_server, &reboot);
+
     // WiFi configuration endpoints
     httpd_uri_t wifi_scan = {
         .uri = "/wifi/scan",
@@ -896,6 +1000,14 @@ static esp_err_t start_ota_server(void)
         .handler = api_status_handler,
     };
     httpd_register_uri_handler(ota_server, &api_status);
+
+    // API RSSI endpoint (plain text, just the dBm value)
+    httpd_uri_t api_rssi = {
+        .uri = "/api/rssi",
+        .method = HTTP_GET,
+        .handler = api_rssi_handler,
+    };
+    httpd_register_uri_handler(ota_server, &api_rssi);
 
     ESP_LOGI(TAG, "OTA server started on port %d", OTA_HTTP_PORT);
     return ESP_OK;
@@ -1189,11 +1301,13 @@ static void handle_client_task(void *pvParameters)
     int client_sock = (int)pvParameters;
     int buffer_index = -1;
 
-    // Connection tracking
-    TickType_t start_time = xTaskGetTickCount();
-    uint32_t total_bytes_in = 0;
-    uint32_t total_bytes_out = 0;
-    uint8_t conn_result = 0;  // 0=success, 1=timeout, 2=error
+    // Per-request tracking for TTFB measurement
+    TickType_t request_start_time = 0;
+    uint32_t request_bytes_in = 0;
+    uint32_t request_bytes_out = 0;
+    bool awaiting_first_byte = false;
+    uint16_t current_ttfb_ms = 0;
+    uint8_t request_result = 0;  // 0=success, 1=timeout, 2=error
 
     // Get source IP
     struct sockaddr_in peer_addr;
@@ -1291,12 +1405,6 @@ static void handle_client_task(void *pvParameters)
     TickType_t last_activity = xTaskGetTickCount();
     const TickType_t timeout_ticks = pdMS_TO_TICKS(PROXY_TIMEOUT_MS);
 
-    #if DEBUG_MODE
-    // Track request/response timing for performance logging
-    TickType_t request_sent_time = 0;
-    bool awaiting_response = false;
-    #endif
-
     // Bidirectional forwarding loop using select() for efficient I/O multiplexing
     while (1) {
         fd_set read_fds;
@@ -1317,7 +1425,7 @@ static void handle_client_task(void *pvParameters)
             // Timeout - check for inactivity timeout
             if ((xTaskGetTickCount() - last_activity) > timeout_ticks) {
                 ESP_LOGI(TAG, "Connection timeout - no activity for %d ms", PROXY_TIMEOUT_MS);
-                conn_result = 1;  // Timeout
+                request_result = 1;  // Timeout
                 break;
             }
             continue;
@@ -1327,11 +1435,21 @@ static void handle_client_task(void *pvParameters)
         if (FD_ISSET(client_sock, &read_fds)) {
             int len = recv(client_sock, client_buffer, PROXY_BUFFER_SIZE, 0);
             if (len > 0) {
-                #if DEBUG_MODE
-                // Record request sent time for response time tracking
-                request_sent_time = xTaskGetTickCount();
-                awaiting_response = true;
-                #endif
+                // If we were waiting for response and got new request data,
+                // log the previous request/response exchange
+                if (request_bytes_out > 0 && !awaiting_first_byte) {
+                    log_request(source_ip, request_bytes_in, request_bytes_out, current_ttfb_ms, request_result);
+                    request_bytes_in = 0;
+                    request_bytes_out = 0;
+                    current_ttfb_ms = 0;
+                    request_result = 0;
+                }
+
+                // Start timing new request
+                if (!awaiting_first_byte) {
+                    request_start_time = xTaskGetTickCount();
+                    awaiting_first_byte = true;
+                }
 
                 // Forward encrypted data to Powerwall
                 int total_sent = 0;
@@ -1357,7 +1475,7 @@ static void handle_client_task(void *pvParameters)
                 }
                 
                 last_activity = xTaskGetTickCount();
-                total_bytes_in += len;
+                request_bytes_in += len;
 
                 #if DEBUG_MODE
                 ESP_LOGI(TAG, "Forwarded %d bytes from client to Powerwall (encrypted)", len);
@@ -1368,7 +1486,7 @@ static void handle_client_task(void *pvParameters)
                 break;
             } else {
                 ESP_LOGE(TAG, "Error reading from client: %d", errno);
-                conn_result = 2;  // Error
+                request_result = 2;  // Error
                 break;
             }
         }
@@ -1377,15 +1495,16 @@ static void handle_client_task(void *pvParameters)
         if (FD_ISSET(powerwall_sock, &read_fds)) {
             int len = recv(powerwall_sock, powerwall_buffer, PROXY_BUFFER_SIZE, 0);
             if (len > 0) {
-                #if DEBUG_MODE
-                // Calculate and log response time if we were awaiting a response
-                if (awaiting_response) {
-                    TickType_t response_time = xTaskGetTickCount() - request_sent_time;
-                    uint32_t response_time_ms = response_time * portTICK_PERIOD_MS;
-                    ESP_LOGI(TAG, "Response time: %lu ms", (unsigned long)response_time_ms);
-                    awaiting_response = false;
+                // Calculate TTFB on first response byte
+                if (awaiting_first_byte) {
+                    TickType_t ttfb_ticks = xTaskGetTickCount() - request_start_time;
+                    uint32_t ttfb_ms = ttfb_ticks * portTICK_PERIOD_MS;
+                    current_ttfb_ms = (ttfb_ms > 65535) ? 65535 : ttfb_ms;
+                    awaiting_first_byte = false;
+                    #if DEBUG_MODE
+                    ESP_LOGI(TAG, "TTFB: %u ms", current_ttfb_ms);
+                    #endif
                 }
-                #endif
                 
                 // Forward encrypted data to client
                 int total_sent = 0;
@@ -1411,7 +1530,7 @@ static void handle_client_task(void *pvParameters)
                 }
                 
                 last_activity = xTaskGetTickCount();
-                total_bytes_out += len;
+                request_bytes_out += len;
 
                 #if DEBUG_MODE
                 ESP_LOGI(TAG, "Forwarded %d bytes from Powerwall to client (encrypted)", len);
@@ -1422,18 +1541,16 @@ static void handle_client_task(void *pvParameters)
                 break;
             } else {
                 ESP_LOGE(TAG, "Error reading from Powerwall: %d", errno);
-                conn_result = 2;  // Error
+                request_result = 2;  // Error
                 break;
             }
         }
     }
 
 cleanup:
-    // Log connection stats
-    {
-        TickType_t duration = xTaskGetTickCount() - start_time;
-        uint16_t duration_ms = (duration * portTICK_PERIOD_MS) > 65535 ? 65535 : (duration * portTICK_PERIOD_MS);
-        log_connection(source_ip, total_bytes_in, total_bytes_out, duration_ms, conn_result);
+    // Log final request if any data was exchanged
+    if (request_bytes_in > 0 || request_bytes_out > 0) {
+        log_request(source_ip, request_bytes_in, request_bytes_out, current_ttfb_ms, request_result);
     }
 
     release_buffer_pair(buffer_index);

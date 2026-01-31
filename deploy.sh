@@ -352,20 +352,24 @@ deploy_firmware() {
     local fw_size=$(stat -f%z "$FIRMWARE_PATH" 2>/dev/null || stat -c%s "$FIRMWARE_PATH" 2>/dev/null)
     print_status "Uploading firmware ($(numfmt --to=iec-i --suffix=B $fw_size 2>/dev/null || echo "$fw_size bytes"))..."
 
-    local response
     local http_code
+    local body
     local tmpfile=$(mktemp)
 
-    # Use --progress-bar for visual feedback, capture response to temp file
-    curl --progress-bar -w "\n%{http_code}" \
+    # Show progress bar on stderr, capture response body to file, return http code
+    # --progress-bar writes to stderr which shows on terminal
+    # -o writes response body to file
+    # -w writes http code to stdout which we capture
+    http_code=$(curl --progress-bar \
         --connect-timeout 10 \
-        --max-time 120 \
+        --max-time 180 \
         -X POST \
         -F "firmware=@${FIRMWARE_PATH}" \
-        "${url}" > "$tmpfile" 2>&1
+        -o "$tmpfile" \
+        -w "%{http_code}" \
+        "${url}")
 
-    http_code=$(tail -1 "$tmpfile")
-    local body=$(sed '$d' "$tmpfile")
+    body=$(cat "$tmpfile" 2>/dev/null)
     rm -f "$tmpfile"
 
     if [[ "$http_code" == "200" ]] || echo "$body" | grep -qi "success"; then
