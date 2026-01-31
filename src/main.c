@@ -61,6 +61,7 @@ typedef struct {
     uint32_t bytes_in;      // Request bytes (client -> powerwall)
     uint32_t bytes_out;     // Response bytes (powerwall -> client)
     uint16_t ttfb_ms;       // Time to first byte from Powerwall
+    uint16_t ttlb_ms;       // Time to last byte (full response duration)
     uint8_t result;         // 0=success, 1=timeout, 2=error
     bool valid;
 } request_log_entry_t;
@@ -74,7 +75,7 @@ static uint32_t avg_ttfb_ms = 0;
 static uint32_t ttfb_sample_count = 0;
 
 /** Log a completed request/response exchange */
-static void log_request(uint32_t source_ip, uint32_t bytes_in, uint32_t bytes_out, uint16_t ttfb_ms, uint8_t result)
+static void log_request(uint32_t source_ip, uint32_t bytes_in, uint32_t bytes_out, uint16_t ttfb_ms, uint16_t ttlb_ms, uint8_t result)
 {
     if (!request_log_mutex) return;
     if (xSemaphoreTake(request_log_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
@@ -84,6 +85,7 @@ static void log_request(uint32_t source_ip, uint32_t bytes_in, uint32_t bytes_ou
         entry->bytes_in = bytes_in;
         entry->bytes_out = bytes_out;
         entry->ttfb_ms = ttfb_ms;
+        entry->ttlb_ms = ttlb_ms;
         entry->result = result;
         entry->valid = true;
         request_log_index = (request_log_index + 1) % REQUEST_LOG_SIZE;
@@ -401,11 +403,14 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
         wifi_connected ? "Connected" : "Disconnected");
     httpd_resp_sendstr_chunk(req, buf);
 
-    // Signal strength (with ID for auto-refresh)
+    // Signal strength (with ID for auto-refresh, colored by quality)
     if (wifi_connected) {
+        const char *sig_color = rssi > -50 ? "#22c55e" : rssi > -60 ? "#84cc16" : rssi > -70 ? "#eab308" : "#ef4444";
+        const char *sig_quality = rssi > -50 ? "Excellent" : rssi > -60 ? "Good" : rssi > -70 ? "Fair" : "Weak";
         snprintf(buf, sizeof(buf),
-            "<div class=\"status-item\"><div class=\"label\">" ICON_SIGNAL " Signal</div><div class=\"value\" id=\"sig\">%d dBm (%s)</div></div>",
-            rssi, rssi > -50 ? "Excellent" : rssi > -60 ? "Good" : rssi > -70 ? "Fair" : "Weak");
+            "<div class=\"status-item\"><div class=\"label\">" ICON_SIGNAL " Signal</div>"
+            "<div class=\"value\" id=\"sig\"><span style=\"color:%s\">%d dBm (%s)</span></div></div>",
+            sig_color, rssi, sig_quality);
     } else {
         snprintf(buf, sizeof(buf),
             "<div class=\"status-item\"><div class=\"label\">" ICON_SIGNAL " Signal</div><div class=\"value\" id=\"sig\">-</div></div>");
@@ -480,7 +485,7 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
     httpd_resp_sendstr_chunk(req,
         "<span class=\"text-xs text-muted\">Updated: <span id=\"lastref\">now</span></span></div>"
         "<table style=\"width:100%;font-size:0.875rem\">"
-        "<tr style=\"color:#94a3b8\"><td>Age</td><td>Source</td><td>Req/Resp</td><td>TTFB</td><td>Status</td></tr>"
+        "<tr style=\"color:#94a3b8\"><td>Age</td><td>Source</td><td>Req/Resp</td><td>Response</td><td>Status</td></tr>"
         "<tbody id=\"reqtbl\">");
 
     if (request_log_mutex && xSemaphoreTake(request_log_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
@@ -503,11 +508,11 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
             uint8_t *ip = (uint8_t *)&e->source_ip;
 
             snprintf(buf, sizeof(buf),
-                "<tr><td>%lld%s</td><td>%d.%d.%d.%d</td><td>%lu/%lu</td><td>%ums</td><td style=\"color:%s\">%s</td></tr>",
+                "<tr><td>%lld%s</td><td>%d.%d.%d.%d</td><td>%lu/%lu</td><td>%u-%ums</td><td style=\"color:%s\">%s</td></tr>",
                 (long long)age, age_unit,
                 ip[0], ip[1], ip[2], ip[3],
                 (unsigned long)e->bytes_in, (unsigned long)e->bytes_out,
-                e->ttfb_ms, color, status);
+                e->ttfb_ms, e->ttlb_ms, color, status);
             httpd_resp_sendstr_chunk(req, buf);
         }
         xSemaphoreGive(request_log_mutex);
@@ -561,12 +566,14 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
         "function refresh(){if(fetching)return;fetching=true;"
         "Promise.all([fetch('/api/status').then(r=>r.json()),fetch('/api/requests').then(r=>r.json())])"
         ".then(function(d){fetching=false;lastOk=Date.now();"
-        "var st=d[0];document.getElementById('sig').textContent=st.wifi.rssi?st.wifi.rssi+' dBm ('+sigQ(st.wifi.rssi)+')':'-';"
+        "var st=d[0],r=st.wifi.rssi,sigEl=document.getElementById('sig');"
+        "if(r){var sc=r>-50?'#22c55e':r>-60?'#84cc16':r>-70?'#eab308':'#ef4444';"
+        "sigEl.innerHTML='<span style=\"color:'+sc+'\">'+r+' dBm ('+sigQ(r)+')</span>';}else{sigEl.textContent='-';}"
         "document.getElementById('cpu').textContent=st.cpu+'%';"
         "var req=d[1];document.getElementById('avgttfb').textContent=req.avg_ttfb;"
         "var h='';req.requests.forEach(function(e){"
         "var c=e.ok?'#22c55e':'#ef4444';"
-        "h+='<tr><td>'+fmtAge(e.age)+'</td><td>'+e.ip+'</td><td>'+e.in+'/'+e.out+'</td><td>'+e.ttfb+'ms</td><td style=\"color:'+c+'\">'+(e.ok?'OK':'ERR')+'</td></tr>';});"
+        "h+='<tr><td>'+fmtAge(e.age)+'</td><td>'+e.ip+'</td><td>'+e.in+'/'+e.out+'</td><td>'+e.ttfb+'-'+e.ttlb+'ms</td><td style=\"color:'+c+'\">'+(e.ok?'OK':'ERR')+'</td></tr>';});"
         "document.getElementById('reqtbl').innerHTML=h;updAge();})"
         ".catch(function(){fetching=false;updAge();});}"
         "setInterval(refresh,5000);setInterval(updAge,1000);refresh();"
@@ -930,11 +937,11 @@ static esp_err_t api_requests_handler(httpd_req_t *req)
             uint8_t *ip = (uint8_t *)&e->source_ip;
 
             snprintf(buf, sizeof(buf),
-                "%s{\"age\":%lld,\"ip\":\"%d.%d.%d.%d\",\"in\":%lu,\"out\":%lu,\"ttfb\":%u,\"ok\":%d}",
+                "%s{\"age\":%lld,\"ip\":\"%d.%d.%d.%d\",\"in\":%lu,\"out\":%lu,\"ttfb\":%u,\"ttlb\":%u,\"ok\":%d}",
                 first ? "" : ",",
                 (long long)age, ip[0], ip[1], ip[2], ip[3],
                 (unsigned long)e->bytes_in, (unsigned long)e->bytes_out,
-                e->ttfb_ms, e->result == 0 ? 1 : 0);
+                e->ttfb_ms, e->ttlb_ms, e->result == 0 ? 1 : 0);
             httpd_resp_sendstr_chunk(req, buf);
             first = false;
         }
@@ -1241,6 +1248,12 @@ static esp_err_t init_ethernet(void)
     ESP_LOGI(TAG, "Ethernet MAC (derived from WiFi): %02x:%02x:%02x:%02x:%02x:%02x",
              mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5]);
 
+    // Set hostname for DHCP (powerwall-XXXX using last 2 bytes of MAC)
+    char hostname[32];
+    snprintf(hostname, sizeof(hostname), "%s-%02X%02X", MDNS_HOSTNAME, mac_addr[4], mac_addr[5]);
+    ESP_ERROR_CHECK(esp_netif_set_hostname(eth_netif, hostname));
+    ESP_LOGI(TAG, "DHCP hostname set to: %s", hostname);
+
     // Attach Ethernet driver to TCP/IP stack
     ESP_ERROR_CHECK(esp_netif_attach(eth_netif, esp_eth_new_netif_glue(eth_handle)));
 
@@ -1281,12 +1294,19 @@ static esp_err_t init_wifi(void)
     return ESP_OK;
 }
 
-/** Initialize mDNS */
+/** Initialize mDNS with hostname including MAC suffix */
 static void init_mdns(void)
 {
     ESP_ERROR_CHECK(mdns_init());
-    ESP_ERROR_CHECK(mdns_hostname_set(MDNS_HOSTNAME));
-    ESP_LOGI(TAG, "mDNS hostname set to: %s", MDNS_HOSTNAME);
+
+    // Generate hostname with last 2 bytes of MAC address (e.g., "powerwall-AB12")
+    uint8_t mac[6];
+    esp_read_mac(mac, ESP_MAC_ETH);
+    char hostname[32];
+    snprintf(hostname, sizeof(hostname), "%s-%02X%02X", MDNS_HOSTNAME, mac[4], mac[5]);
+
+    ESP_ERROR_CHECK(mdns_hostname_set(hostname));
+    ESP_LOGI(TAG, "mDNS hostname set to: %s.local", hostname);
 
     // Create TXT records with device info (using runtime wifi_ssid)
     mdns_txt_item_t txt_records[] = {
@@ -1295,10 +1315,19 @@ static void init_mdns(void)
         {"ota_port", "8080"},
     };
 
-    mdns_service_add(NULL, MDNS_SERVICE, MDNS_PROTOCOL, PROXY_PORT, txt_records,
+    // Add _powerwall._tcp service for proxy discovery (port 443)
+    mdns_service_add("powerwall", MDNS_SERVICE, MDNS_PROTOCOL, PROXY_PORT, txt_records,
                      sizeof(txt_records) / sizeof(txt_records[0]));
-    ESP_LOGI(TAG, "mDNS service added: %s.%s on port %d (wifi: %s)",
-             MDNS_SERVICE, MDNS_PROTOCOL, PROXY_PORT, wifi_ssid);
+    ESP_LOGI(TAG, "mDNS service added: powerwall.%s.%s on port %d", MDNS_SERVICE, MDNS_PROTOCOL, PROXY_PORT);
+
+    // Add _http._tcp service for status/OTA web UI (port 8080)
+    mdns_txt_item_t http_txt[] = {
+        {"path", "/"},
+        {"wifi_ssid", wifi_ssid},
+    };
+    mdns_service_add("Powerwall Bridge", "_http", "_tcp", OTA_HTTP_PORT, http_txt,
+                     sizeof(http_txt) / sizeof(http_txt[0]));
+    ESP_LOGI(TAG, "mDNS service added: _http._tcp on port %d", OTA_HTTP_PORT);
 }
 
 /** WiFi quality monitoring task - periodically logs connection quality */
@@ -1423,12 +1452,13 @@ static void handle_client_task(void *pvParameters)
     int client_sock = (int)pvParameters;
     int buffer_index = -1;
 
-    // Per-request tracking for TTFB measurement
+    // Per-request tracking for TTFB/TTLB measurement
     TickType_t request_start_time = 0;
     uint32_t request_bytes_in = 0;
     uint32_t request_bytes_out = 0;
     bool awaiting_first_byte = false;
     uint16_t current_ttfb_ms = 0;
+    uint16_t current_ttlb_ms = 0;
     uint8_t request_result = 0;  // 0=success, 1=timeout, 2=error
 
     // Get source IP
@@ -1560,10 +1590,11 @@ static void handle_client_task(void *pvParameters)
                 // If we were waiting for response and got new request data,
                 // log the previous request/response exchange
                 if (request_bytes_out > 0 && !awaiting_first_byte) {
-                    log_request(source_ip, request_bytes_in, request_bytes_out, current_ttfb_ms, request_result);
+                    log_request(source_ip, request_bytes_in, request_bytes_out, current_ttfb_ms, current_ttlb_ms, request_result);
                     request_bytes_in = 0;
                     request_bytes_out = 0;
                     current_ttfb_ms = 0;
+                    current_ttlb_ms = 0;
                     request_result = 0;
                 }
 
@@ -1654,6 +1685,11 @@ static void handle_client_task(void *pvParameters)
                 last_activity = xTaskGetTickCount();
                 request_bytes_out += len;
 
+                // Update TTLB (time to last byte) - updated on each chunk
+                TickType_t ttlb_ticks = last_activity - request_start_time;
+                uint32_t ttlb_ms = ttlb_ticks * portTICK_PERIOD_MS;
+                current_ttlb_ms = (ttlb_ms > 65535) ? 65535 : ttlb_ms;
+
                 #if DEBUG_MODE
                 ESP_LOGI(TAG, "Forwarded %d bytes from Powerwall to client (encrypted)", len);
                 ESP_LOG_BUFFER_HEXDUMP(TAG, powerwall_buffer, len < 64 ? len : 64, ESP_LOG_INFO);
@@ -1672,7 +1708,7 @@ static void handle_client_task(void *pvParameters)
 cleanup:
     // Log final request if any data was exchanged
     if (request_bytes_in > 0 || request_bytes_out > 0) {
-        log_request(source_ip, request_bytes_in, request_bytes_out, current_ttfb_ms, request_result);
+        log_request(source_ip, request_bytes_in, request_bytes_out, current_ttfb_ms, current_ttlb_ms, request_result);
     }
 
     release_buffer_pair(buffer_index);
