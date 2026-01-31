@@ -51,6 +51,41 @@ static char wifi_password[65] = WIFI_PASSWORD;
 static volatile bool powerwall_reachable = false;
 static volatile int64_t last_powerwall_check = 0;
 
+// ===== Connection Log =====
+#define CONNECTION_LOG_SIZE 5
+
+typedef struct {
+    int64_t timestamp;      // Unix-like timestamp (seconds since boot)
+    uint32_t bytes_in;      // Bytes received from client
+    uint32_t bytes_out;     // Bytes sent to client
+    uint32_t source_ip;     // Source IP (network byte order)
+    uint16_t duration_ms;   // Connection duration in ms
+    uint8_t result;         // 0=success, 1=timeout, 2=error
+    bool valid;             // Entry is valid
+} connection_log_entry_t;
+
+static connection_log_entry_t connection_log[CONNECTION_LOG_SIZE];
+static int connection_log_index = 0;
+static SemaphoreHandle_t connection_log_mutex = NULL;
+
+/** Log a completed connection */
+static void log_connection(uint32_t source_ip, uint32_t bytes_in, uint32_t bytes_out, uint16_t duration_ms, uint8_t result)
+{
+    if (!connection_log_mutex) return;
+    if (xSemaphoreTake(connection_log_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        connection_log_entry_t *entry = &connection_log[connection_log_index];
+        entry->timestamp = esp_timer_get_time() / 1000000;  // Seconds since boot
+        entry->source_ip = source_ip;
+        entry->bytes_in = bytes_in;
+        entry->bytes_out = bytes_out;
+        entry->duration_ms = duration_ms;
+        entry->result = result;
+        entry->valid = true;
+        connection_log_index = (connection_log_index + 1) % CONNECTION_LOG_SIZE;
+        xSemaphoreGive(connection_log_mutex);
+    }
+}
+
 // Event group for WiFi and Ethernet status
 static EventGroupHandle_t s_event_group;
 #define WIFI_CONNECTED_BIT BIT0
@@ -83,8 +118,12 @@ static SemaphoreHandle_t buffer_pool_mutex = NULL;
 static void init_buffer_pool(void)
 {
     buffer_pool_mutex = xSemaphoreCreateMutex();
+    connection_log_mutex = xSemaphoreCreateMutex();
     for (int i = 0; i < MAX_CONCURRENT_CLIENTS; i++) {
         buffer_pool[i].in_use = false;
+    }
+    for (int i = 0; i < CONNECTION_LOG_SIZE; i++) {
+        connection_log[i].valid = false;
     }
     ESP_LOGI(TAG, "Buffer pool initialized: %d slots, %d bytes each",
              MAX_CONCURRENT_CLIENTS, PROXY_BUFFER_SIZE * 2);
@@ -313,9 +352,10 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
     // Status card - header
     httpd_resp_sendstr_chunk(req, "<div class=\"card\"><h1>ESP32 WiFi Bridge</h1><div class=\"grid\">");
 
-    // WiFi status
+    // WiFi status (clickable to show/hide WiFi config)
     snprintf(buf, sizeof(buf),
-        "<div class=\"status-item\"><div class=\"label\">WiFi Status</div>"
+        "<div class=\"status-item\" style=\"cursor:pointer\" onclick=\"document.getElementById('wificfg').style.display=document.getElementById('wificfg').style.display==='none'?'block':'none'\">"
+        "<div class=\"label\">WiFi Status <span style=\"font-size:0.6rem\">&#9660;</span></div>"
         "<div class=\"value\"><span class=\"status-dot %s\"></span>%s</div></div>",
         wifi_connected ? "status-ok" : "status-err",
         wifi_connected ? "Connected" : "Disconnected");
@@ -341,29 +381,81 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
         "</div></div>", POWERWALL_IP_STR);
     httpd_resp_sendstr_chunk(req, buf);
 
-    // WiFi Configuration card - split into parts
+    // WiFi Configuration card (hidden by default, toggle via WiFi Status click)
     httpd_resp_sendstr_chunk(req,
-        "<div class=\"card\"><h2>WiFi Configuration</h2>"
+        "<div class=\"card\" id=\"wificfg\" style=\"display:none\"><h2>WiFi Configuration</h2>"
         "<form method=\"POST\" action=\"/wifi/save\">"
-        "<div class=\"form-group\"><label class=\"label\">Network SSID</label>"
-        "<div class=\"flex mt-1\">");
+        "<div class=\"form-group\"><label class=\"label\">Network SSID</label>");
 
     snprintf(buf, sizeof(buf),
-        "<input type=\"text\" name=\"ssid\" id=\"ssid\" value=\"%s\" placeholder=\"Enter SSID\">", wifi_ssid);
+        "<input type=\"text\" name=\"ssid\" id=\"ssid\" value=\"%s\" placeholder=\"Enter SSID\" class=\"mt-1\">", wifi_ssid);
     httpd_resp_sendstr_chunk(req, buf);
 
     httpd_resp_sendstr_chunk(req,
-        "<button type=\"button\" class=\"btn btn-secondary\" onclick=\"scanWifi()\">Scan</button></div>"
-        "<select id=\"wl\" class=\"mt-1\" style=\"display:none\" onchange=\"document.getElementById('ssid').value=this.value\"></select></div>"
+        "<div class=\"flex mt-1\">"
+        "<button type=\"button\" class=\"btn btn-secondary\" onclick=\"scanWifi()\">Scan Networks</button>"
+        "<select id=\"wl\" style=\"display:none;flex:1\" onchange=\"document.getElementById('ssid').value=this.value\"></select>"
+        "</div></div>");
+
+    httpd_resp_sendstr_chunk(req,
         "<div class=\"form-group\"><label class=\"label\">Password</label>"
-        "<input type=\"password\" name=\"password\" placeholder=\"Enter password\"></div><div class=\"flex\">"
-        "<button type=\"submit\" class=\"btn btn-primary\">Save &amp; Reconnect</button>");
+        "<input type=\"password\" name=\"password\" placeholder=\"Enter password\" class=\"mt-1\"></div>");
 
     snprintf(buf, sizeof(buf),
-        "<span class=\"text-sm text-muted\">Current: %s</span></div></form></div>", wifi_ssid);
+        "<div class=\"text-xs text-muted\" style=\"margin-bottom:0.75rem\">Current network: %s</div>"
+        "<button type=\"submit\" class=\"btn btn-primary\">Save &amp; Reconnect</button>"
+        "</form></div>", wifi_ssid);
     httpd_resp_sendstr_chunk(req, buf);
 
-    // Firmware card
+    // System info card
+    snprintf(buf, sizeof(buf),
+        "<div class=\"card\"><h2>System</h2>"
+        "<div class=\"grid\">"
+        "<div class=\"status-item\"><div class=\"label\">WiFi IP</div><div class=\"value\">%s</div></div>"
+        "<div class=\"status-item\"><div class=\"label\">Free Heap</div><div class=\"value\">%lu KB</div></div>"
+        "</div></div>",
+        ip_str, (unsigned long)(esp_get_free_heap_size() / 1024));
+    httpd_resp_sendstr_chunk(req, buf);
+
+    // Recent connections card
+    httpd_resp_sendstr_chunk(req,
+        "<div class=\"card\"><h2>Recent Connections</h2>"
+        "<table style=\"width:100%;font-size:0.875rem\">"
+        "<tr style=\"color:#94a3b8\"><td>Time</td><td>Source</td><td>In/Out</td><td>Dur</td><td>Status</td></tr>");
+
+    if (connection_log_mutex && xSemaphoreTake(connection_log_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        int64_t now = esp_timer_get_time() / 1000000;
+        for (int i = 0; i < CONNECTION_LOG_SIZE; i++) {
+            // Read in reverse order (most recent first)
+            int idx = (connection_log_index - 1 - i + CONNECTION_LOG_SIZE) % CONNECTION_LOG_SIZE;
+            connection_log_entry_t *e = &connection_log[idx];
+            if (!e->valid) continue;
+
+            int64_t age = now - e->timestamp;
+            const char *age_unit = "s";
+            if (age >= 3600) { age /= 3600; age_unit = "h"; }
+            else if (age >= 60) { age /= 60; age_unit = "m"; }
+
+            const char *status = e->result == 0 ? "OK" : (e->result == 1 ? "TMO" : "ERR");
+            const char *color = e->result == 0 ? "#22c55e" : (e->result == 1 ? "#eab308" : "#ef4444");
+
+            // Format source IP
+            uint8_t *ip = (uint8_t *)&e->source_ip;
+
+            snprintf(buf, sizeof(buf),
+                "<tr><td>%lld%s</td><td>%d.%d.%d.%d</td><td>%lu/%lu</td><td>%ums</td><td style=\"color:%s\">%s</td></tr>",
+                (long long)age, age_unit,
+                ip[0], ip[1], ip[2], ip[3],
+                (unsigned long)e->bytes_in, (unsigned long)e->bytes_out,
+                e->duration_ms, color, status);
+            httpd_resp_sendstr_chunk(req, buf);
+        }
+        xSemaphoreGive(connection_log_mutex);
+    }
+
+    httpd_resp_sendstr_chunk(req, "</table></div>");
+
+    // Firmware card (at bottom)
     snprintf(buf, sizeof(buf),
         "<div class=\"card\"><h2>Firmware</h2>"
         "<div class=\"grid\">"
@@ -378,7 +470,7 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
         ota_state == ESP_OTA_IMG_PENDING_VERIFY ? "Pending" : "New");
     httpd_resp_sendstr_chunk(req, buf);
 
-    // OTA upload form (static, send directly)
+    // OTA upload form
     httpd_resp_sendstr_chunk(req,
         "<form method=\"POST\" action=\"/ota/upload\" enctype=\"multipart/form-data\">"
         "<div class=\"form-group\"><label class=\"label\">Upload Firmware (.bin)</label>"
@@ -388,16 +480,6 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
         "<button type=\"button\" class=\"btn btn-danger\" onclick=\"if(confirm('Rollback?'))document.getElementById('rb').submit()\">Rollback</button></div>"
         "</form><form id=\"rb\" method=\"POST\" action=\"/ota/rollback\"></form>"
         "<div class=\"alert alert-warn mt-2\">Device will reboot after update</div></div>");
-
-    // System info card
-    snprintf(buf, sizeof(buf),
-        "<div class=\"card\"><h2>System</h2>"
-        "<div class=\"grid\">"
-        "<div class=\"status-item\"><div class=\"label\">WiFi IP</div><div class=\"value\">%s</div></div>"
-        "<div class=\"status-item\"><div class=\"label\">Free Heap</div><div class=\"value\">%lu KB</div></div>"
-        "</div></div>",
-        ip_str, (unsigned long)(esp_get_free_heap_size() / 1024));
-    httpd_resp_sendstr_chunk(req, buf);
 
     // JavaScript for WiFi scanning
     httpd_resp_sendstr_chunk(req,
@@ -1107,6 +1189,20 @@ static void handle_client_task(void *pvParameters)
     int client_sock = (int)pvParameters;
     int buffer_index = -1;
 
+    // Connection tracking
+    TickType_t start_time = xTaskGetTickCount();
+    uint32_t total_bytes_in = 0;
+    uint32_t total_bytes_out = 0;
+    uint8_t conn_result = 0;  // 0=success, 1=timeout, 2=error
+
+    // Get source IP
+    struct sockaddr_in peer_addr;
+    socklen_t peer_len = sizeof(peer_addr);
+    uint32_t source_ip = 0;
+    if (getpeername(client_sock, (struct sockaddr *)&peer_addr, &peer_len) == 0) {
+        source_ip = peer_addr.sin_addr.s_addr;
+    }
+
     ESP_LOGI(TAG, "Handling client connection (SSL passthrough mode)");
 
     // Acquire buffer pair from pool (avoids malloc/free overhead)
@@ -1221,6 +1317,7 @@ static void handle_client_task(void *pvParameters)
             // Timeout - check for inactivity timeout
             if ((xTaskGetTickCount() - last_activity) > timeout_ticks) {
                 ESP_LOGI(TAG, "Connection timeout - no activity for %d ms", PROXY_TIMEOUT_MS);
+                conn_result = 1;  // Timeout
                 break;
             }
             continue;
@@ -1260,7 +1357,8 @@ static void handle_client_task(void *pvParameters)
                 }
                 
                 last_activity = xTaskGetTickCount();
-                
+                total_bytes_in += len;
+
                 #if DEBUG_MODE
                 ESP_LOGI(TAG, "Forwarded %d bytes from client to Powerwall (encrypted)", len);
                 ESP_LOG_BUFFER_HEXDUMP(TAG, client_buffer, len < 64 ? len : 64, ESP_LOG_INFO);
@@ -1270,6 +1368,7 @@ static void handle_client_task(void *pvParameters)
                 break;
             } else {
                 ESP_LOGE(TAG, "Error reading from client: %d", errno);
+                conn_result = 2;  // Error
                 break;
             }
         }
@@ -1312,7 +1411,8 @@ static void handle_client_task(void *pvParameters)
                 }
                 
                 last_activity = xTaskGetTickCount();
-                
+                total_bytes_out += len;
+
                 #if DEBUG_MODE
                 ESP_LOGI(TAG, "Forwarded %d bytes from Powerwall to client (encrypted)", len);
                 ESP_LOG_BUFFER_HEXDUMP(TAG, powerwall_buffer, len < 64 ? len : 64, ESP_LOG_INFO);
@@ -1322,12 +1422,20 @@ static void handle_client_task(void *pvParameters)
                 break;
             } else {
                 ESP_LOGE(TAG, "Error reading from Powerwall: %d", errno);
+                conn_result = 2;  // Error
                 break;
             }
         }
     }
 
 cleanup:
+    // Log connection stats
+    {
+        TickType_t duration = xTaskGetTickCount() - start_time;
+        uint16_t duration_ms = (duration * portTICK_PERIOD_MS) > 65535 ? 65535 : (duration * portTICK_PERIOD_MS);
+        log_connection(source_ip, total_bytes_in, total_bytes_out, duration_ms, conn_result);
+    }
+
     release_buffer_pair(buffer_index);
     close(powerwall_sock);
     close(client_sock);
