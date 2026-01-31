@@ -310,6 +310,9 @@ build_firmware() {
         exit 1
     fi
 
+    # Force CMake to refresh git version by removing cached project description
+    rm -f .pio/build/esp32-s3-devkitc-1/project_description.json 2>/dev/null
+
     if pio run; then
         print_success "Build completed successfully"
 
