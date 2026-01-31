@@ -13,10 +13,6 @@
 #define POWERWALL_IP_ADDR4 1
 #define POWERWALL_IP_STR "192.168.91.1"
 
-// ===== Ethernet Configuration =====
-// MAC address for W5500 Ethernet (change if you have multiple devices)
-#define ETH_MAC_ADDR { 0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED }
-
 // ===== W5500 SPI Pin Configuration =====
 // These are the correct pins for ESP32-S3-POE-ETH (Waveshare)
 #define W5500_INT_GPIO  10
@@ -28,8 +24,9 @@
 // ===== Proxy Server Configuration =====
 #define PROXY_PORT 443
 #define PROXY_TIMEOUT_MS 60000  // 60 seconds (increased from 30)
-#define PROXY_BUFFER_SIZE 2048  // Buffer size for forwarding encrypted data
+#define PROXY_BUFFER_SIZE 4096  // Buffer size for forwarding encrypted data (larger = fewer syscalls)
 #define SSL_PASSTHROUGH_TASK_STACK_SIZE 6144  // Stack size per client task (reduced from 8192)
+#define MAX_CONCURRENT_CLIENTS 4  // Maximum simultaneous proxy connections (each uses 2 buffers)
 
 // ===== TTL Configuration =====
 // TTL (Time-To-Live) value to set on outgoing packets to hide external origin
@@ -53,5 +50,11 @@
 // ===== Debug Configuration =====
 // Enable DEBUG_MODE to show encrypted packet forwarding details
 #define DEBUG_MODE 0  // Set to 1 to enable debug logging
+
+// ===== OTA Configuration =====
+// HTTP server port for OTA firmware uploads (separate from proxy port)
+#define OTA_HTTP_PORT 8080
+// Maximum firmware size (must match partition size: 0x1C0000 = 1835008 bytes)
+#define OTA_MAX_FIRMWARE_SIZE 0x1C0000
 
 #endif // CONFIG_H

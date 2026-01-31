@@ -6,7 +6,7 @@
 # Uses mDNS to automatically discover the device on the network.
 #
 
-set -e
+# Note: We don't use set -e because dns-sd/grep commands may fail normally
 
 # Configuration
 MDNS_HOSTNAME="powerwall"
@@ -73,44 +73,210 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Resolve mDNS hostname to IP address
-resolve_mdns() {
-    local hostname="$1"
-    local ip=""
+# Discover all powerwall devices via mDNS
+# Returns lines in format: "IP|HOSTNAME|WIFI_SSID|TARGET|OTA_PORT" (empty fields if TXT records missing)
+discover_devices() {
+    local devices=""
 
-    print_status "Discovering device via mDNS (${hostname}.local)..."
+    # Print status to stderr so it doesn't mix with returned device data
+    echo -e "${BLUE}[*]${NC} Scanning for devices via mDNS (3 seconds)..." >&2
 
     if command -v dns-sd &> /dev/null; then
-        # macOS: Use dns-sd with timeout
-        ip=$(dns-sd -G v4 "${hostname}.local" 2>/dev/null &
-            PID=$!
+        # macOS: Use dns-sd to browse for services
+        local tmpfile=$(mktemp)
+        local tmpfile_lookup=$(mktemp)
+        local tmpfile_instances=$(mktemp)
+
+        echo -e "${BLUE}[*]${NC}   Browsing for _powerwall._tcp services..." >&2
+        dns-sd -B _powerwall._tcp local > "$tmpfile" 2>&1 &
+        local pid=$!
+        sleep 3
+        kill $pid 2>/dev/null || :
+        wait $pid 2>/dev/null || :
+
+        # Extract instance names (last field on lines containing "Add")
+        grep "Add" "$tmpfile" 2>/dev/null | awk '{print $NF}' | sort -u > "$tmpfile_instances" || :
+        local instance_count=$(wc -l < "$tmpfile_instances" | tr -d ' ')
+        echo -e "${BLUE}[*]${NC}   Found ${instance_count} service(s)" >&2
+
+        local lookup_output="" ip="" wifi_ssid="" target="" ota_port=""
+
+        while read -r instance; do
+            [[ -z "$instance" ]] && continue
+
+            echo -e "${BLUE}[*]${NC}   Querying ${instance}..." >&2
+
+            # Lookup service to get TXT records
+            dns-sd -L "$instance" _powerwall._tcp local > "$tmpfile_lookup" 2>&1 &
+            pid=$!
             sleep 2
-            kill $PID 2>/dev/null
-            wait $PID 2>/dev/null
-        ) || true
+            kill $pid 2>/dev/null || :
+            wait $pid 2>/dev/null || :
 
-        # Parse the output - dns-sd outputs IP on a line like "Hostname.local. 10.0.0.1"
-        ip=$(timeout 5 dns-sd -G v4 "${hostname}.local" 2>&1 | grep -E "^\s*${hostname}" | awk '{print $NF}' | head -1) || true
+            lookup_output=$(cat "$tmpfile_lookup" 2>/dev/null) || :
 
-        # Alternative: use ping which resolves mDNS on macOS
-        if [[ -z "$ip" ]]; then
-            ip=$(ping -c 1 -t 3 "${hostname}.local" 2>/dev/null | head -1 | grep -oE '\d+\.\d+\.\d+\.\d+' | head -1) || true
+            # Resolve hostname to IP
+            ip=$(ping -c 1 -t 2 "${instance}.local" 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -1) || :
+
+            if [[ -n "$ip" ]]; then
+                # Extract TXT records (they appear on a line like: " key=value key=value")
+                wifi_ssid=$(echo "$lookup_output" | grep -oE 'wifi_ssid=[^ ]+' | cut -d= -f2 | head -1) || :
+                target=$(echo "$lookup_output" | grep -oE 'target=[^ ]+' | cut -d= -f2 | head -1) || :
+                ota_port=$(echo "$lookup_output" | grep -oE 'ota_port=[^ ]+' | cut -d= -f2 | head -1) || :
+
+                echo -e "${BLUE}[*]${NC}     -> ${ip} (wifi: ${wifi_ssid:-n/a})" >&2
+                devices+="${ip}|${instance}|${wifi_ssid}|${target}|${ota_port}"$'\n'
+            else
+                echo -e "${YELLOW}[!]${NC}     -> Could not resolve IP" >&2
+            fi
+
+            # Reset for next iteration
+            lookup_output="" ip="" wifi_ssid="" target="" ota_port=""
+        done < "$tmpfile_instances"
+
+        rm -f "$tmpfile" "$tmpfile_lookup" "$tmpfile_instances"
+
+        # Fallback: try direct hostname resolution (no TXT records available)
+        if [[ -z "$devices" ]]; then
+            local ip
+            ip=$(ping -c 1 -t 3 "${MDNS_HOSTNAME}.local" 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -1) || true
+            if [[ -n "$ip" ]]; then
+                devices="${ip}|${MDNS_HOSTNAME}|||"$'\n'
+            fi
         fi
 
-    elif command -v avahi-resolve &> /dev/null; then
-        # Linux: Use avahi-resolve
-        ip=$(avahi-resolve -4 -n "${hostname}.local" 2>/dev/null | awk '{print $2}')
+    elif command -v avahi-browse &> /dev/null; then
+        # Linux: Use avahi-browse with TXT records
+        local browse_output
+        browse_output=$(timeout 5 avahi-browse -rpt _powerwall._tcp 2>/dev/null || true)
 
-    elif command -v getent &> /dev/null; then
-        # Linux fallback: getent with mdns
-        ip=$(getent ahostsv4 "${hostname}.local" 2>/dev/null | head -1 | awk '{print $1}')
+        while IFS=';' read -r status iface proto name type domain hostname address port txt; do
+            [[ "$status" != "=" ]] && continue
+            [[ -z "$address" ]] && continue
+            # Skip IPv6
+            [[ "$address" == *:* ]] && continue
+
+            local clean_hostname="${hostname%.local}"
+
+            # Extract TXT records from avahi output
+            local wifi_ssid="" target="" ota_port=""
+            wifi_ssid=$(echo "$txt" | grep -oE '"wifi_ssid=[^"]*"' | sed 's/"wifi_ssid=\(.*\)"/\1/') || true
+            target=$(echo "$txt" | grep -oE '"target=[^"]*"' | sed 's/"target=\(.*\)"/\1/') || true
+            ota_port=$(echo "$txt" | grep -oE '"ota_port=[^"]*"' | sed 's/"ota_port=\(.*\)"/\1/') || true
+
+            devices+="${address}|${clean_hostname}|${wifi_ssid}|${target}|${ota_port}"$'\n'
+        done <<< "$browse_output"
+
+        # Fallback
+        if [[ -z "$devices" ]]; then
+            local ip
+            ip=$(avahi-resolve -4 -n "${MDNS_HOSTNAME}.local" 2>/dev/null | awk '{print $2}')
+            if [[ -n "$ip" ]]; then
+                devices="${ip}|${MDNS_HOSTNAME}|||"$'\n'
+            fi
+        fi
 
     else
-        # Last resort: try ping
-        ip=$(ping -c 1 -W 3 "${hostname}.local" 2>/dev/null | head -1 | grep -oE '\d+\.\d+\.\d+\.\d+' | head -1) || true
+        # Last resort: try ping (no TXT records available)
+        local ip
+        ip=$(ping -c 1 -W 3 "${MDNS_HOSTNAME}.local" 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -1) || true
+        if [[ -n "$ip" ]]; then
+            devices="${ip}|${MDNS_HOSTNAME}|||"$'\n'
+        fi
     fi
 
-    echo "$ip"
+    # Remove empty lines and duplicates
+    echo "$devices" | grep -v '^$' | sort -u
+}
+
+# Check if device has required TXT records for OTA
+is_device_compatible() {
+    local wifi_ssid="$1"
+    local target="$2"
+    local ota_port="$3"
+
+    [[ -n "$wifi_ssid" ]] && [[ -n "$target" ]] && [[ -n "$ota_port" ]]
+}
+
+# Let user select a device if multiple are found
+# Note: All interactive output goes to stderr so stdout can be captured for the IP
+select_device() {
+    local devices="$1"
+    local device_count
+    device_count=$(echo "$devices" | wc -l | tr -d ' ')
+
+    if [[ "$device_count" -eq 0 ]] || [[ -z "$devices" ]]; then
+        return 1
+    elif [[ "$device_count" -eq 1 ]]; then
+        # Single device - check compatibility and use it
+        local ip hostname wifi_ssid target ota_port
+        IFS='|' read -r ip hostname wifi_ssid target ota_port <<< "$devices"
+
+        if is_device_compatible "$wifi_ssid" "$target" "$ota_port"; then
+            print_success "Found device: ${hostname}.local (${ip})"
+            print_status "  WiFi: ${wifi_ssid}"
+            print_status "  Target: ${target}"
+            echo "$ip"
+            return 0
+        else
+            print_error "Found device ${hostname}.local (${ip}) but it is incompatible"
+            print_error "Missing required TXT records (wifi_ssid, target, ota_port)"
+            print_error "Update the device firmware first using: pio run -t upload"
+            return 1
+        fi
+    else
+        # Multiple devices - let user choose
+        # All output to stderr so stdout only contains the selected IP
+        echo -e "${BLUE}[*]${NC} Found ${device_count} devices:" >&2
+        echo "" >&2
+
+        # Display table header
+        printf "      %-15s  %-16s  %-22s  %-15s  %s\n" "IP" "HOSTNAME" "WIFI" "TARGET" "STATUS" >&2
+        printf "      %-15s  %-16s  %-22s  %-15s  %s\n" "---------------" "----------------" "----------------------" "---------------" "------------" >&2
+
+        local i=1
+        local device_array=()
+        local compatible_array=()
+
+        # Display devices
+        while IFS='|' read -r ip hostname wifi_ssid target ota_port; do
+            [[ -z "$ip" ]] && continue
+            device_array+=("$ip")
+
+            local status
+            if is_device_compatible "$wifi_ssid" "$target" "$ota_port"; then
+                compatible_array+=(1)
+                printf "  ${BLUE}%d)${NC}  %-15s  %-16s  %-22s  %-15s  ${GREEN}OK${NC}\n" \
+                    "$i" "$ip" "${hostname}.local" "${wifi_ssid}" "${target}" >&2
+            else
+                compatible_array+=(0)
+                printf "  ${YELLOW}%d)${NC}  %-15s  %-16s  %-22s  %-15s  ${RED}incompatible${NC}\n" \
+                    "$i" "$ip" "${hostname}.local" "${wifi_ssid:--}" "${target:--}" >&2
+            fi
+
+            ((i++))
+        done <<< "$devices"
+
+        echo "" >&2
+        local max_selection=$((i-1))
+        local selection
+        while true; do
+            # Read from /dev/tty to get user input even when stdout is captured
+            echo -n "Select device [1-${max_selection}]: " >&2
+            read -r selection < /dev/tty
+            if [[ "$selection" =~ ^[0-9]+$ ]] && [[ "$selection" -ge 1 ]] && [[ "$selection" -le "$max_selection" ]]; then
+                local idx=$((selection-1))
+                if [[ "${compatible_array[$idx]}" -eq 1 ]]; then
+                    echo "${device_array[$idx]}"
+                    return 0
+                else
+                    print_error "Device #${selection} is incompatible. Please select a compatible device or update it first."
+                fi
+            else
+                print_error "Invalid selection. Please enter a number between 1 and ${max_selection}"
+            fi
+        done
+    fi
 }
 
 # Build firmware
@@ -221,16 +387,22 @@ main() {
     if [[ "$DEPLOY" == true ]]; then
         # Get device IP
         if [[ -z "$DEVICE_IP" ]]; then
-            DEVICE_IP=$(resolve_mdns "$MDNS_HOSTNAME")
+            local devices
+            devices=$(discover_devices)
 
-            if [[ -z "$DEVICE_IP" ]]; then
-                print_error "Could not discover device via mDNS"
+            if [[ -z "$devices" ]]; then
+                print_error "No devices discovered via mDNS"
                 print_error "Make sure the device is running and on the same network"
                 print_status "You can specify IP manually with: $0 -i <IP_ADDRESS>"
                 exit 1
             fi
 
-            print_success "Found device at ${DEVICE_IP}"
+            DEVICE_IP=$(select_device "$devices")
+
+            if [[ -z "$DEVICE_IP" ]]; then
+                print_error "No device selected"
+                exit 1
+            fi
         else
             print_status "Using specified IP: ${DEVICE_IP}"
         fi

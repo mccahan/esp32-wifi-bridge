@@ -114,7 +114,7 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
     esp_ota_img_states_t ota_state;
     esp_ota_get_state_partition(running, &ota_state);
 
-    char response[1536];
+    char response[1792];
     snprintf(response, sizeof(response),
         "<!DOCTYPE html><html><head><title>ESP32 OTA Update</title>"
         "<style>body{font-family:Arial,sans-serif;margin:40px;background:#f5f5f5;}"
@@ -128,6 +128,8 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
         "<table>"
         "<tr><td class='label'>Version:</td><td class='value'>%s</td></tr>"
         "<tr><td class='label'>Build Date:</td><td class='value'>%s %s</td></tr>"
+        "<tr><td class='label'>WiFi Network:</td><td class='value'>%s</td></tr>"
+        "<tr><td class='label'>Target:</td><td class='value'>%s</td></tr>"
         "<tr><td class='label'>Running Partition:</td><td class='value'>%s (0x%lx)</td></tr>"
         "<tr><td class='label'>Next Update Partition:</td><td class='value'>%s</td></tr>"
         "<tr><td class='label'>App State:</td><td class='value'>%s</td></tr>"
@@ -141,6 +143,8 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
         "</div></body></html>",
         app_desc->version,
         app_desc->date, app_desc->time,
+        WIFI_SSID,
+        POWERWALL_IP_STR,
         running->label, (unsigned long)running->address,
         update ? update->label : "none",
         ota_state == ESP_OTA_IMG_VALID ? "Valid" :
