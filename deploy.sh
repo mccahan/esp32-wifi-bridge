@@ -33,6 +33,7 @@ usage() {
     echo "  -b, --build-only     Only build, don't deploy"
     echo "  -d, --deploy-only    Only deploy (skip build)"
     echo "  -i, --ip ADDRESS     Use specific IP instead of mDNS discovery"
+    echo "  -a, --all            Deploy to ALL eligible devices (no prompt)"
     echo "  -h, --help           Show this help message"
     echo ""
     echo "Examples:"
@@ -40,11 +41,13 @@ usage() {
     echo "  $0 -i 192.168.1.100  # Build and deploy to specific IP"
     echo "  $0 -b                # Build only"
     echo "  $0 -d -i 10.0.0.50   # Deploy only to specific IP"
+    echo "  $0 -a                # Build and deploy to all eligible devices"
 }
 
 # Parse arguments
 BUILD=true
 DEPLOY=true
+DEPLOY_ALL=false
 DEVICE_IP=""
 
 while [[ $# -gt 0 ]]; do
@@ -60,6 +63,10 @@ while [[ $# -gt 0 ]]; do
         -i|--ip)
             DEVICE_IP="$2"
             shift 2
+            ;;
+        -a|--all)
+            DEPLOY_ALL=true
+            shift
             ;;
         -h|--help)
             usage
@@ -279,6 +286,21 @@ select_device() {
     fi
 }
 
+# Get list of all compatible device IPs
+get_compatible_devices() {
+    local devices="$1"
+    local compatible_ips=""
+
+    while IFS='|' read -r ip hostname wifi_ssid target ota_port; do
+        [[ -z "$ip" ]] && continue
+        if is_device_compatible "$wifi_ssid" "$target" "$ota_port"; then
+            compatible_ips+="$ip "
+        fi
+    done <<< "$devices"
+
+    echo "$compatible_ips"
+}
+
 # Build firmware
 build_firmware() {
     print_status "Building firmware..."
@@ -397,18 +419,52 @@ main() {
                 exit 1
             fi
 
-            DEVICE_IP=$(select_device "$devices")
+            if [[ "$DEPLOY_ALL" == true ]]; then
+                # Deploy to all compatible devices
+                local compatible_ips
+                compatible_ips=$(get_compatible_devices "$devices")
 
-            if [[ -z "$DEVICE_IP" ]]; then
-                print_error "No device selected"
-                exit 1
+                if [[ -z "$compatible_ips" ]]; then
+                    print_error "No compatible devices found"
+                    print_error "Devices must have wifi_ssid, target, and ota_port TXT records"
+                    exit 1
+                fi
+
+                local ip_array=($compatible_ips)
+                local device_count=${#ip_array[@]}
+                print_success "Found ${device_count} compatible device(s)"
+
+                local success_count=0
+                local fail_count=0
+
+                for ip in "${ip_array[@]}"; do
+                    echo ""
+                    print_status "Deploying to ${ip}..."
+                    if deploy_firmware "$ip"; then
+                        ((success_count++))
+                    else
+                        ((fail_count++))
+                        print_error "Failed to deploy to ${ip}"
+                    fi
+                done
+
+                echo ""
+                print_success "Deployment complete: ${success_count} succeeded, ${fail_count} failed"
+            else
+                DEVICE_IP=$(select_device "$devices")
+
+                if [[ -z "$DEVICE_IP" ]]; then
+                    print_error "No device selected"
+                    exit 1
+                fi
+                echo ""
+                deploy_firmware "$DEVICE_IP"
             fi
         else
             print_status "Using specified IP: ${DEVICE_IP}"
+            echo ""
+            deploy_firmware "$DEVICE_IP"
         fi
-
-        echo ""
-        deploy_firmware "$DEVICE_IP"
     fi
 
     echo ""

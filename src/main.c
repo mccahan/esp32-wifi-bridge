@@ -21,6 +21,7 @@
 #include "esp_eth.h"
 #include "esp_netif.h"
 #include "nvs_flash.h"
+#include "nvs.h"
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
 #include "mdns.h"
@@ -31,10 +32,24 @@
 #include "esp_ota_ops.h"
 #include "esp_http_server.h"
 #include "esp_app_format.h"
+#include "esp_timer.h"
 
 #include "config.h"
 
 static const char *TAG = "wifi-eth-bridge";
+
+// NVS namespace for WiFi credentials
+#define NVS_WIFI_NAMESPACE "wifi_config"
+#define NVS_KEY_SSID "ssid"
+#define NVS_KEY_PASSWORD "password"
+
+// WiFi credentials (runtime, loaded from NVS or defaults)
+static char wifi_ssid[33] = WIFI_SSID;
+static char wifi_password[65] = WIFI_PASSWORD;
+
+// Powerwall connectivity status
+static volatile bool powerwall_reachable = false;
+static volatile int64_t last_powerwall_check = 0;
 
 // Event group for WiFi and Ethernet status
 static EventGroupHandle_t s_event_group;
@@ -103,57 +118,299 @@ static void release_buffer_pair(int index)
     }
 }
 
+// ===== NVS WiFi Credential Storage =====
+
+/** Load WiFi credentials from NVS */
+static esp_err_t load_wifi_credentials(void)
+{
+    nvs_handle_t nvs_handle;
+    esp_err_t err = nvs_open(NVS_WIFI_NAMESPACE, NVS_READONLY, &nvs_handle);
+    if (err != ESP_OK) {
+        ESP_LOGI(TAG, "No saved WiFi credentials, using defaults");
+        return err;
+    }
+
+    size_t ssid_len = sizeof(wifi_ssid);
+    size_t pass_len = sizeof(wifi_password);
+
+    err = nvs_get_str(nvs_handle, NVS_KEY_SSID, wifi_ssid, &ssid_len);
+    if (err == ESP_OK) {
+        err = nvs_get_str(nvs_handle, NVS_KEY_PASSWORD, wifi_password, &pass_len);
+    }
+
+    nvs_close(nvs_handle);
+
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "Loaded WiFi credentials from NVS: SSID=%s", wifi_ssid);
+    } else {
+        // Reset to defaults if load failed
+        strncpy(wifi_ssid, WIFI_SSID, sizeof(wifi_ssid) - 1);
+        strncpy(wifi_password, WIFI_PASSWORD, sizeof(wifi_password) - 1);
+        ESP_LOGW(TAG, "Failed to load WiFi credentials, using defaults");
+    }
+
+    return err;
+}
+
+/** Save WiFi credentials to NVS */
+static esp_err_t save_wifi_credentials(const char *ssid, const char *password)
+{
+    nvs_handle_t nvs_handle;
+    esp_err_t err = nvs_open(NVS_WIFI_NAMESPACE, NVS_READWRITE, &nvs_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to open NVS: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    err = nvs_set_str(nvs_handle, NVS_KEY_SSID, ssid);
+    if (err == ESP_OK) {
+        err = nvs_set_str(nvs_handle, NVS_KEY_PASSWORD, password);
+    }
+    if (err == ESP_OK) {
+        err = nvs_commit(nvs_handle);
+    }
+
+    nvs_close(nvs_handle);
+
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "WiFi credentials saved to NVS: SSID=%s", ssid);
+        // Update runtime credentials
+        strncpy(wifi_ssid, ssid, sizeof(wifi_ssid) - 1);
+        wifi_ssid[sizeof(wifi_ssid) - 1] = '\0';
+        strncpy(wifi_password, password, sizeof(wifi_password) - 1);
+        wifi_password[sizeof(wifi_password) - 1] = '\0';
+    } else {
+        ESP_LOGE(TAG, "Failed to save WiFi credentials: %s", esp_err_to_name(err));
+    }
+
+    return err;
+}
+
+// ===== Powerwall Connectivity Check =====
+
+/** Check if Powerwall is reachable (non-blocking TCP connect test) */
+static void check_powerwall_connectivity(void)
+{
+    int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (sock < 0) {
+        powerwall_reachable = false;
+        return;
+    }
+
+    // Set socket to non-blocking
+    int flags = fcntl(sock, F_GETFL, 0);
+    fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+
+    struct sockaddr_in addr;
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(443);
+    inet_pton(AF_INET, POWERWALL_IP_STR, &addr.sin_addr);
+
+    int result = connect(sock, (struct sockaddr *)&addr, sizeof(addr));
+
+    if (result == 0) {
+        powerwall_reachable = true;
+    } else if (errno == EINPROGRESS) {
+        // Wait for connection with timeout
+        fd_set write_fds;
+        FD_ZERO(&write_fds);
+        FD_SET(sock, &write_fds);
+        struct timeval tv = {.tv_sec = 2, .tv_usec = 0};
+
+        if (select(sock + 1, NULL, &write_fds, NULL, &tv) > 0) {
+            int error = 0;
+            socklen_t len = sizeof(error);
+            getsockopt(sock, SOL_SOCKET, SO_ERROR, &error, &len);
+            powerwall_reachable = (error == 0);
+        } else {
+            powerwall_reachable = false;
+        }
+    } else {
+        powerwall_reachable = false;
+    }
+
+    close(sock);
+    last_powerwall_check = esp_timer_get_time() / 1000;  // Convert to ms
+}
+
 // ===== OTA Update Handlers =====
 
-/** OTA status page - shows current firmware info and upload form */
+// Dark mode CSS (Tailwind-inspired)
+static const char *DARK_CSS =
+    "*{box-sizing:border-box;margin:0;padding:0}"
+    "body{font-family:system-ui,-apple-system,sans-serif;background:#0f172a;color:#e2e8f0;min-height:100vh;padding:1.5rem}"
+    ".container{max-width:42rem;margin:0 auto}"
+    ".card{background:#1e293b;border-radius:0.75rem;padding:1.5rem;margin-bottom:1rem;border:1px solid #334155}"
+    "h1{font-size:1.5rem;font-weight:600;margin-bottom:1rem;color:#f8fafc}"
+    "h2{font-size:1.125rem;font-weight:600;margin-bottom:0.75rem;color:#f1f5f9}"
+    ".grid{display:grid;grid-template-columns:1fr 1fr;gap:0.75rem}"
+    ".status-item{background:#0f172a;padding:0.75rem;border-radius:0.5rem}"
+    ".label{font-size:0.75rem;color:#94a3b8;text-transform:uppercase;letter-spacing:0.05em}"
+    ".value{font-size:1rem;font-weight:500;margin-top:0.25rem;font-family:ui-monospace,monospace}"
+    ".status-dot{display:inline-block;width:0.5rem;height:0.5rem;border-radius:50%%;margin-right:0.5rem}"
+    ".status-ok{background:#22c55e}.status-warn{background:#eab308}.status-err{background:#ef4444}"
+    "input,select{width:100%%;padding:0.625rem;border-radius:0.375rem;border:1px solid #475569;background:#0f172a;color:#e2e8f0;font-size:0.875rem;margin-top:0.25rem}"
+    "input:focus,select:focus{outline:none;border-color:#3b82f6;box-shadow:0 0 0 2px rgba(59,130,246,0.3)}"
+    ".btn{padding:0.625rem 1.25rem;border-radius:0.375rem;font-weight:500;cursor:pointer;border:none;font-size:0.875rem;transition:all 0.15s}"
+    ".btn-primary{background:#3b82f6;color:#fff}.btn-primary:hover{background:#2563eb}"
+    ".btn-danger{background:#dc2626;color:#fff}.btn-danger:hover{background:#b91c1c}"
+    ".btn-secondary{background:#475569;color:#fff}.btn-secondary:hover{background:#64748b}"
+    ".form-group{margin-bottom:1rem}"
+    ".flex{display:flex;gap:0.5rem;align-items:center}"
+    ".mt-1{margin-top:0.5rem}.mt-2{margin-top:1rem}"
+    ".text-sm{font-size:0.875rem}.text-xs{font-size:0.75rem}"
+    ".text-muted{color:#64748b}"
+    ".alert{padding:0.75rem;border-radius:0.375rem;font-size:0.875rem}"
+    ".alert-warn{background:rgba(234,179,8,0.1);border:1px solid #eab308;color:#fbbf24}"
+    "hr{border:none;border-top:1px solid #334155;margin:1rem 0}"
+    "@keyframes pulse{0%%,100%%{opacity:1}50%%{opacity:0.5}}.animate-pulse{animation:pulse 2s infinite}";
+
+/** OTA status page - modern dark theme with WiFi config */
 static esp_err_t ota_status_handler(httpd_req_t *req)
 {
     const esp_app_desc_t *app_desc = esp_app_get_description();
     const esp_partition_t *running = esp_ota_get_running_partition();
-    const esp_partition_t *update = esp_ota_get_next_update_partition(NULL);
     esp_ota_img_states_t ota_state;
     esp_ota_get_state_partition(running, &ota_state);
 
-    char response[1792];
-    snprintf(response, sizeof(response),
-        "<!DOCTYPE html><html><head><title>ESP32 OTA Update</title>"
-        "<style>body{font-family:Arial,sans-serif;margin:40px;background:#f5f5f5;}"
-        ".card{background:white;padding:20px;border-radius:8px;box-shadow:0 2px 4px rgba(0,0,0,0.1);max-width:500px;}"
-        "h1{color:#333;margin-top:0;}table{width:100%%;margin:15px 0;}td{padding:5px 0;}"
-        ".label{color:#666;}.value{font-family:monospace;}"
-        "input[type=file]{margin:10px 0;}"
-        "button{background:#4CAF50;color:white;padding:10px 20px;border:none;border-radius:4px;cursor:pointer;}"
-        "button:hover{background:#45a049;}.warn{color:#f44336;}</style></head>"
-        "<body><div class='card'><h1>OTA Firmware Update</h1>"
-        "<table>"
-        "<tr><td class='label'>Version:</td><td class='value'>%s</td></tr>"
-        "<tr><td class='label'>Build Date:</td><td class='value'>%s %s</td></tr>"
-        "<tr><td class='label'>WiFi Network:</td><td class='value'>%s</td></tr>"
-        "<tr><td class='label'>Target:</td><td class='value'>%s</td></tr>"
-        "<tr><td class='label'>Running Partition:</td><td class='value'>%s (0x%lx)</td></tr>"
-        "<tr><td class='label'>Next Update Partition:</td><td class='value'>%s</td></tr>"
-        "<tr><td class='label'>App State:</td><td class='value'>%s</td></tr>"
-        "</table>"
-        "<hr><h3>Upload New Firmware</h3>"
-        "<form method='POST' action='/ota/upload' enctype='multipart/form-data'>"
-        "<input type='file' name='firmware' accept='.bin'><br>"
-        "<button type='submit'>Upload &amp; Update</button>"
-        "</form>"
-        "<p class='warn'>Device will reboot after successful update.</p>"
-        "</div></body></html>",
-        app_desc->version,
-        app_desc->date, app_desc->time,
-        WIFI_SSID,
-        POWERWALL_IP_STR,
-        running->label, (unsigned long)running->address,
-        update ? update->label : "none",
-        ota_state == ESP_OTA_IMG_VALID ? "Valid" :
-        ota_state == ESP_OTA_IMG_NEW ? "New (pending validation)" :
-        ota_state == ESP_OTA_IMG_PENDING_VERIFY ? "Pending verification" : "Unknown"
-    );
+    // Get WiFi status
+    EventBits_t bits = xEventGroupGetBits(s_event_group);
+    bool wifi_connected = (bits & WIFI_CONNECTED_BIT) != 0;
 
+    wifi_ap_record_t ap_info = {0};
+    int rssi = 0;
+    if (wifi_connected) {
+        if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) {
+            rssi = ap_info.rssi;
+        }
+    }
+
+    // Check Powerwall connectivity (rate-limited)
+    int64_t now = esp_timer_get_time() / 1000;
+    if (now - last_powerwall_check > 5000 || last_powerwall_check == 0) {
+        check_powerwall_connectivity();
+    }
+
+    // Get IP address
+    esp_netif_ip_info_t ip_info;
+    char ip_str[16] = "N/A";
+    if (wifi_netif && esp_netif_get_ip_info(wifi_netif, &ip_info) == ESP_OK) {
+        snprintf(ip_str, sizeof(ip_str), IPSTR, IP2STR(&ip_info.ip));
+    }
+
+    // Build response - split into chunks for memory efficiency
     httpd_resp_set_type(req, "text/html");
-    httpd_resp_send(req, response, strlen(response));
+
+    // Send HTML head and CSS separately (CSS is too large for single buffer)
+    httpd_resp_sendstr_chunk(req,
+        "<!DOCTYPE html><html><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+        "<title>ESP32 WiFi Bridge</title><style>");
+    httpd_resp_sendstr_chunk(req, DARK_CSS);
+    httpd_resp_sendstr_chunk(req, "</style></head><body><div class=\"container\">");
+
+    char buf[512];
+
+    // Status card - header
+    httpd_resp_sendstr_chunk(req, "<div class=\"card\"><h1>ESP32 WiFi Bridge</h1><div class=\"grid\">");
+
+    // WiFi status
+    snprintf(buf, sizeof(buf),
+        "<div class=\"status-item\"><div class=\"label\">WiFi Status</div>"
+        "<div class=\"value\"><span class=\"status-dot %s\"></span>%s</div></div>",
+        wifi_connected ? "status-ok" : "status-err",
+        wifi_connected ? "Connected" : "Disconnected");
+    httpd_resp_sendstr_chunk(req, buf);
+
+    // Signal strength
+    snprintf(buf, sizeof(buf),
+        "<div class=\"status-item\"><div class=\"label\">Signal</div><div class=\"value\">%s</div></div>",
+        wifi_connected ? (rssi > -50 ? "Excellent" : rssi > -60 ? "Good" : rssi > -70 ? "Fair" : "Weak") : "-");
+    httpd_resp_sendstr_chunk(req, buf);
+
+    // Powerwall status
+    snprintf(buf, sizeof(buf),
+        "<div class=\"status-item\"><div class=\"label\">Powerwall</div>"
+        "<div class=\"value\"><span class=\"status-dot %s\"></span>%s</div></div>",
+        powerwall_reachable ? "status-ok" : "status-err",
+        powerwall_reachable ? "Reachable" : "Unreachable");
+    httpd_resp_sendstr_chunk(req, buf);
+
+    // Target IP
+    snprintf(buf, sizeof(buf),
+        "<div class=\"status-item\"><div class=\"label\">Target IP</div><div class=\"value\">%s</div></div>"
+        "</div></div>", POWERWALL_IP_STR);
+    httpd_resp_sendstr_chunk(req, buf);
+
+    // WiFi Configuration card - split into parts
+    httpd_resp_sendstr_chunk(req,
+        "<div class=\"card\"><h2>WiFi Configuration</h2>"
+        "<form method=\"POST\" action=\"/wifi/save\">"
+        "<div class=\"form-group\"><label class=\"label\">Network SSID</label>"
+        "<div class=\"flex mt-1\">");
+
+    snprintf(buf, sizeof(buf),
+        "<input type=\"text\" name=\"ssid\" id=\"ssid\" value=\"%s\" placeholder=\"Enter SSID\">", wifi_ssid);
+    httpd_resp_sendstr_chunk(req, buf);
+
+    httpd_resp_sendstr_chunk(req,
+        "<button type=\"button\" class=\"btn btn-secondary\" onclick=\"scanWifi()\">Scan</button></div>"
+        "<select id=\"wl\" class=\"mt-1\" style=\"display:none\" onchange=\"document.getElementById('ssid').value=this.value\"></select></div>"
+        "<div class=\"form-group\"><label class=\"label\">Password</label>"
+        "<input type=\"password\" name=\"password\" placeholder=\"Enter password\"></div><div class=\"flex\">"
+        "<button type=\"submit\" class=\"btn btn-primary\">Save &amp; Reconnect</button>");
+
+    snprintf(buf, sizeof(buf),
+        "<span class=\"text-sm text-muted\">Current: %s</span></div></form></div>", wifi_ssid);
+    httpd_resp_sendstr_chunk(req, buf);
+
+    // Firmware card
+    snprintf(buf, sizeof(buf),
+        "<div class=\"card\"><h2>Firmware</h2>"
+        "<div class=\"grid\">"
+        "<div class=\"status-item\"><div class=\"label\">Version</div><div class=\"value\">%s</div></div>"
+        "<div class=\"status-item\"><div class=\"label\">Built</div><div class=\"value text-sm\">%s</div></div>"
+        "<div class=\"status-item\"><div class=\"label\">Partition</div><div class=\"value\">%s</div></div>"
+        "<div class=\"status-item\"><div class=\"label\">State</div><div class=\"value\">%s</div></div>"
+        "</div><hr>",
+        app_desc->version, app_desc->date,
+        running->label,
+        ota_state == ESP_OTA_IMG_VALID ? "Valid" :
+        ota_state == ESP_OTA_IMG_PENDING_VERIFY ? "Pending" : "New");
+    httpd_resp_sendstr_chunk(req, buf);
+
+    // OTA upload form (static, send directly)
+    httpd_resp_sendstr_chunk(req,
+        "<form method=\"POST\" action=\"/ota/upload\" enctype=\"multipart/form-data\">"
+        "<div class=\"form-group\"><label class=\"label\">Upload Firmware (.bin)</label>"
+        "<input type=\"file\" name=\"firmware\" accept=\".bin\" class=\"mt-1\"></div>"
+        "<div class=\"flex\"><button type=\"submit\" class=\"btn btn-primary\">Upload &amp; Update</button>");
+    httpd_resp_sendstr_chunk(req,
+        "<button type=\"button\" class=\"btn btn-danger\" onclick=\"if(confirm('Rollback?'))document.getElementById('rb').submit()\">Rollback</button></div>"
+        "</form><form id=\"rb\" method=\"POST\" action=\"/ota/rollback\"></form>"
+        "<div class=\"alert alert-warn mt-2\">Device will reboot after update</div></div>");
+
+    // System info card
+    snprintf(buf, sizeof(buf),
+        "<div class=\"card\"><h2>System</h2>"
+        "<div class=\"grid\">"
+        "<div class=\"status-item\"><div class=\"label\">WiFi IP</div><div class=\"value\">%s</div></div>"
+        "<div class=\"status-item\"><div class=\"label\">Free Heap</div><div class=\"value\">%lu KB</div></div>"
+        "</div></div>",
+        ip_str, (unsigned long)(esp_get_free_heap_size() / 1024));
+    httpd_resp_sendstr_chunk(req, buf);
+
+    // JavaScript for WiFi scanning
+    httpd_resp_sendstr_chunk(req,
+        "<script>"
+        "function scanWifi(){"
+        "var s=document.getElementById('wl');"
+        "s.innerHTML='<option>Scanning...</option>';s.style.display='block';"
+        "fetch('/wifi/scan').then(r=>r.json()).then(d=>{"
+        "s.innerHTML=d.networks.map(n=>'<option value=\"'+n.ssid+'\">'+n.ssid+' ('+n.rssi+'dBm)</option>').join('');"
+        "}).catch(e=>{s.innerHTML='<option>Scan failed</option>';});}"
+        "</script></div></body></html>");
+
+    httpd_resp_sendstr_chunk(req, NULL);  // End chunked response
     return ESP_OK;
 }
 
@@ -278,6 +535,186 @@ static esp_err_t ota_upload_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+/** WiFi scan handler - returns JSON list of networks */
+static esp_err_t wifi_scan_handler(httpd_req_t *req)
+{
+    ESP_LOGI(TAG, "Starting WiFi scan...");
+
+    // Configure scan
+    wifi_scan_config_t scan_config = {
+        .ssid = NULL,
+        .bssid = NULL,
+        .channel = 0,
+        .show_hidden = false,
+        .scan_type = WIFI_SCAN_TYPE_ACTIVE,
+        .scan_time.active.min = 100,
+        .scan_time.active.max = 300,
+    };
+
+    esp_err_t err = esp_wifi_scan_start(&scan_config, true);  // Blocking scan
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "WiFi scan failed: %s", esp_err_to_name(err));
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Scan failed");
+        return ESP_FAIL;
+    }
+
+    uint16_t ap_count = 0;
+    esp_wifi_scan_get_ap_num(&ap_count);
+
+    wifi_ap_record_t *ap_list = NULL;
+    if (ap_count > 0) {
+        if (ap_count > 20) ap_count = 20;  // Limit results
+        ap_list = malloc(ap_count * sizeof(wifi_ap_record_t));
+        if (ap_list) {
+            esp_wifi_scan_get_ap_records(&ap_count, ap_list);
+        }
+    }
+
+    // Build JSON response
+    httpd_resp_set_type(req, "application/json");
+
+    char buf[64];
+    httpd_resp_sendstr_chunk(req, "{\"networks\":[");
+
+    for (int i = 0; i < ap_count && ap_list; i++) {
+        snprintf(buf, sizeof(buf), "%s{\"ssid\":\"%s\",\"rssi\":%d}",
+                 i > 0 ? "," : "",
+                 (char *)ap_list[i].ssid,
+                 ap_list[i].rssi);
+        httpd_resp_sendstr_chunk(req, buf);
+    }
+
+    httpd_resp_sendstr_chunk(req, "]}");
+    httpd_resp_sendstr_chunk(req, NULL);
+
+    if (ap_list) free(ap_list);
+
+    ESP_LOGI(TAG, "WiFi scan complete: %d networks found", ap_count);
+    return ESP_OK;
+}
+
+/** WiFi save handler - saves new credentials and reconnects */
+static esp_err_t wifi_save_handler(httpd_req_t *req)
+{
+    char content[256];
+    int received = httpd_req_recv(req, content, sizeof(content) - 1);
+    if (received <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No data");
+        return ESP_FAIL;
+    }
+    content[received] = '\0';
+
+    ESP_LOGI(TAG, "WiFi save request: %s", content);
+
+    // Parse form data (ssid=xxx&password=xxx)
+    char new_ssid[33] = {0};
+    char new_password[65] = {0};
+
+    // Find ssid=
+    char *ssid_start = strstr(content, "ssid=");
+    if (ssid_start) {
+        ssid_start += 5;
+        char *ssid_end = strchr(ssid_start, '&');
+        size_t ssid_len = ssid_end ? (size_t)(ssid_end - ssid_start) : strlen(ssid_start);
+        if (ssid_len > sizeof(new_ssid) - 1) ssid_len = sizeof(new_ssid) - 1;
+        strncpy(new_ssid, ssid_start, ssid_len);
+    }
+
+    // Find password=
+    char *pass_start = strstr(content, "password=");
+    if (pass_start) {
+        pass_start += 9;
+        char *pass_end = strchr(pass_start, '&');
+        size_t pass_len = pass_end ? (size_t)(pass_end - pass_start) : strlen(pass_start);
+        if (pass_len > sizeof(new_password) - 1) pass_len = sizeof(new_password) - 1;
+        strncpy(new_password, pass_start, pass_len);
+    }
+
+    // URL decode (basic: + to space, %XX)
+    for (char *p = new_ssid; *p; p++) if (*p == '+') *p = ' ';
+    for (char *p = new_password; *p; p++) if (*p == '+') *p = ' ';
+
+    if (strlen(new_ssid) == 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "SSID required");
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "Saving new WiFi credentials: SSID=%s", new_ssid);
+
+    // Save to NVS
+    esp_err_t err = save_wifi_credentials(new_ssid, new_password);
+    if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to save");
+        return ESP_FAIL;
+    }
+
+    // Send success response before reconnecting
+    const char *response =
+        "<!DOCTYPE html><html><head><meta charset=\"UTF-8\">"
+        "<meta http-equiv=\"refresh\" content=\"10;url=/\">"
+        "<style>body{font-family:system-ui;background:#0f172a;color:#e2e8f0;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}"
+        ".box{background:#1e293b;padding:2rem;border-radius:0.75rem;text-align:center;border:1px solid #334155}"
+        ".spinner{width:3rem;height:3rem;border:3px solid #334155;border-top:3px solid #3b82f6;border-radius:50%;animation:spin 1s linear infinite;margin:1rem auto}"
+        "@keyframes spin{to{transform:rotate(360deg)}}</style></head>"
+        "<body><div class=\"box\"><div class=\"spinner\"></div>"
+        "<h2>Reconnecting WiFi...</h2>"
+        "<p>Connecting to new network. Page will refresh automatically.</p>"
+        "</div></body></html>";
+
+    httpd_resp_set_type(req, "text/html");
+    httpd_resp_send(req, response, strlen(response));
+
+    // Disconnect and reconnect with new credentials
+    vTaskDelay(pdMS_TO_TICKS(500));
+
+    esp_wifi_disconnect();
+
+    wifi_config_t wifi_config = {0};
+    strncpy((char *)wifi_config.sta.ssid, new_ssid, sizeof(wifi_config.sta.ssid) - 1);
+    strncpy((char *)wifi_config.sta.password, new_password, sizeof(wifi_config.sta.password) - 1);
+    wifi_config.sta.threshold.authmode = WIFI_AUTH_OPEN;
+
+    esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
+    esp_wifi_connect();
+
+    ESP_LOGI(TAG, "WiFi reconnecting to: %s", new_ssid);
+    return ESP_OK;
+}
+
+/** API endpoint for status JSON */
+static esp_err_t api_status_handler(httpd_req_t *req)
+{
+    EventBits_t bits = xEventGroupGetBits(s_event_group);
+    bool wifi_connected = (bits & WIFI_CONNECTED_BIT) != 0;
+
+    wifi_ap_record_t ap_info = {0};
+    int rssi = 0;
+    if (wifi_connected && esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) {
+        rssi = ap_info.rssi;
+    }
+
+    // Check Powerwall
+    int64_t now = esp_timer_get_time() / 1000;
+    if (now - last_powerwall_check > 5000) {
+        check_powerwall_connectivity();
+    }
+
+    char response[256];
+    snprintf(response, sizeof(response),
+        "{\"wifi\":{\"connected\":%s,\"ssid\":\"%s\",\"rssi\":%d},"
+        "\"powerwall\":{\"reachable\":%s,\"ip\":\"%s\"},"
+        "\"heap\":%lu}",
+        wifi_connected ? "true" : "false",
+        wifi_ssid, rssi,
+        powerwall_reachable ? "true" : "false",
+        POWERWALL_IP_STR,
+        (unsigned long)esp_get_free_heap_size());
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, response, strlen(response));
+    return ESP_OK;
+}
+
 /** Manual rollback handler */
 static esp_err_t ota_rollback_handler(httpd_req_t *req)
 {
@@ -316,7 +753,7 @@ static esp_err_t start_ota_server(void)
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = OTA_HTTP_PORT;
     config.stack_size = 8192;
-    config.max_uri_handlers = 4;
+    config.max_uri_handlers = 8;
 
     esp_err_t err = httpd_start(&ota_server, &config);
     if (err != ESP_OK) {
@@ -345,6 +782,29 @@ static esp_err_t start_ota_server(void)
         .handler = ota_rollback_handler,
     };
     httpd_register_uri_handler(ota_server, &ota_rollback);
+
+    // WiFi configuration endpoints
+    httpd_uri_t wifi_scan = {
+        .uri = "/wifi/scan",
+        .method = HTTP_GET,
+        .handler = wifi_scan_handler,
+    };
+    httpd_register_uri_handler(ota_server, &wifi_scan);
+
+    httpd_uri_t wifi_save = {
+        .uri = "/wifi/save",
+        .method = HTTP_POST,
+        .handler = wifi_save_handler,
+    };
+    httpd_register_uri_handler(ota_server, &wifi_save);
+
+    // API status endpoint
+    httpd_uri_t api_status = {
+        .uri = "/api/status",
+        .method = HTTP_GET,
+        .handler = api_status_handler,
+    };
+    httpd_register_uri_handler(ota_server, &api_status);
 
     ESP_LOGI(TAG, "OTA server started on port %d", OTA_HTTP_PORT);
     return ESP_OK;
@@ -517,6 +977,9 @@ static esp_err_t init_wifi(void)
 {
     ESP_LOGI(TAG, "Initializing WiFi...");
 
+    // Load saved WiFi credentials from NVS (or use defaults)
+    load_wifi_credentials();
+
     // Create default WiFi station
     wifi_netif = esp_netif_create_default_wifi_sta();
 
@@ -526,19 +989,16 @@ static esp_err_t init_wifi(void)
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_got_ip_handler, NULL));
 
-    wifi_config_t wifi_config = {
-        .sta = {
-            .ssid = WIFI_SSID,
-            .password = WIFI_PASSWORD,
-            .threshold.authmode = WIFI_AUTH_OPEN,
-        },
-    };
+    wifi_config_t wifi_config = {0};
+    strncpy((char *)wifi_config.sta.ssid, wifi_ssid, sizeof(wifi_config.sta.ssid) - 1);
+    strncpy((char *)wifi_config.sta.password, wifi_password, sizeof(wifi_config.sta.password) - 1);
+    wifi_config.sta.threshold.authmode = WIFI_AUTH_OPEN;
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    ESP_LOGI(TAG, "WiFi initialized - connecting to %s", WIFI_SSID);
+    ESP_LOGI(TAG, "WiFi initialized - connecting to %s", wifi_ssid);
     return ESP_OK;
 }
 
@@ -549,9 +1009,9 @@ static void init_mdns(void)
     ESP_ERROR_CHECK(mdns_hostname_set(MDNS_HOSTNAME));
     ESP_LOGI(TAG, "mDNS hostname set to: %s", MDNS_HOSTNAME);
 
-    // Create TXT records with device info
+    // Create TXT records with device info (using runtime wifi_ssid)
     mdns_txt_item_t txt_records[] = {
-        {"wifi_ssid", WIFI_SSID},
+        {"wifi_ssid", wifi_ssid},
         {"target", POWERWALL_IP_STR},
         {"ota_port", "8080"},
     };
@@ -559,7 +1019,7 @@ static void init_mdns(void)
     mdns_service_add(NULL, MDNS_SERVICE, MDNS_PROTOCOL, PROXY_PORT, txt_records,
                      sizeof(txt_records) / sizeof(txt_records[0]));
     ESP_LOGI(TAG, "mDNS service added: %s.%s on port %d (wifi: %s)",
-             MDNS_SERVICE, MDNS_PROTOCOL, PROXY_PORT, WIFI_SSID);
+             MDNS_SERVICE, MDNS_PROTOCOL, PROXY_PORT, wifi_ssid);
 }
 
 /** WiFi quality monitoring task - periodically logs connection quality */
