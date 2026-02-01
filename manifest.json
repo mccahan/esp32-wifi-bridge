@@ -1,6 +1,6 @@
 {
   "name": "ESP32 WiFi Bridge",
-  "version": "f78c6b7",
+  "version": "v1.0.3",
   "new_install_prompt_erase": true,
   "builds": [{
     "chipFamily": "ESP32-S3",
