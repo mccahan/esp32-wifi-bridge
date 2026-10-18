@@ -12,7 +12,7 @@
 MDNS_HOSTNAME="powerwall"
 WEB_PORT=80
 OTA_PORT=80
-FIRMWARE_PATH=".pio/build/esp32-s3-devkitc-1/firmware.bin"
+PIO_ENV="esp32-s3-devkitc-1"
 TIMEOUT=10
 
 # Colors for output
@@ -35,6 +35,7 @@ usage() {
     echo "  -d, --deploy-only    Only deploy (skip build)"
     echo "  -i, --ip ADDRESS     Use specific IP instead of mDNS discovery"
     echo "  -a, --all            Deploy to ALL eligible devices (no prompt)"
+    echo "  -e, --env ENV        PlatformIO env: esp32-s3-devkitc-1 (default) or gl-s10"
     echo "  -h, --help           Show this help message"
     echo ""
     echo "Examples:"
@@ -69,6 +70,10 @@ while [[ $# -gt 0 ]]; do
             DEPLOY_ALL=true
             shift
             ;;
+        -e|--env)
+            PIO_ENV="$2"
+            shift 2
+            ;;
         -h|--help)
             usage
             exit 0
@@ -80,6 +85,8 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+FIRMWARE_PATH=".pio/build/${PIO_ENV}/firmware.bin"
 
 # Discover all powerwall devices via mDNS
 # Returns lines in format: "IP|HOSTNAME|WIFI_SSID|TARGET|OTA_PORT" (empty fields if TXT records missing)
@@ -313,9 +320,9 @@ build_firmware() {
     fi
 
     # Force CMake to refresh git version by removing cached project description
-    rm -f .pio/build/esp32-s3-devkitc-1/project_description.json 2>/dev/null
+    rm -f ".pio/build/${PIO_ENV}/project_description.json" 2>/dev/null
 
-    if pio run; then
+    if pio run -e "$PIO_ENV"; then
         print_success "Build completed successfully"
 
         # Show firmware size

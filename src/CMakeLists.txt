@@ -13,7 +13,13 @@ idf_build_set_property(LINK_OPTIONS "-Wl,--wrap=lwip_bind" APPEND)
 #   2. include/config.local.h (optional local override)
 #   3. git origin → https://<owner>.github.io/<repo>/version.json
 #   4. config.h default (upstream Pages)
+#   Each board has its own channel: the GL-S10 (IDF_TARGET esp32) reads gl-s10/version.json.
 set(_local_h "${CMAKE_CURRENT_LIST_DIR}/../include/config.local.h")
+if(IDF_TARGET STREQUAL "esp32")
+    set(_ota_board_dir "gl-s10/")
+else()
+    set(_ota_board_dir "")
+endif()
 if(DEFINED ENV{REMOTE_OTA_VERSION_URL} AND NOT "$ENV{REMOTE_OTA_VERSION_URL}" STREQUAL "")
     target_compile_definitions(${COMPONENT_LIB} PRIVATE
         "REMOTE_OTA_VERSION_URL=\"$ENV{REMOTE_OTA_VERSION_URL}\"")
@@ -31,7 +37,7 @@ elseif(NOT EXISTS "${_local_h}")
         set(_ota_repo "${CMAKE_MATCH_2}")
         string(REGEX REPLACE "\\.git$" "" _ota_repo "${_ota_repo}")
         string(REGEX REPLACE "/$" "" _ota_repo "${_ota_repo}")
-        set(_derived "https://${_ota_owner}.github.io/${_ota_repo}/version.json")
+        set(_derived "https://${_ota_owner}.github.io/${_ota_repo}/${_ota_board_dir}version.json")
         target_compile_definitions(${COMPONENT_LIB} PRIVATE
             "REMOTE_OTA_VERSION_URL=\"${_derived}\"")
         message(STATUS "REMOTE_OTA_VERSION_URL from git origin: ${_derived}")

@@ -57,6 +57,8 @@ Tagged `v*` releases publish firmware to GitHub Pages. OTA URL is derived from t
 
 Waveshare ESP32-S3-POE-ETH. W5500 SPI: MISO=12 MOSI=11 SCLK=13 CS=14 INT=10. Platform `espressif32@6.9.0`.
 
+GL.iNet GL-S10 (`-e gl-s10`, `BOARD_GL_S10` from `CONFIG_IDF_TARGET_ESP32`): internal EMAC + IP101, MDC=23 MDIO=18 clock in GPIO0, PHY addr 1, PHY power GPIO5; RESET button GPIO33 replaces BOOT (`RECOVERY_BUTTON_NAME`); LEDs 14 (power) and 32 (Wi-Fi up), active low; no temperature sensor (`SOC_TEMP_SENSOR_SUPPORTED`). Target settings in `sdkconfig.defaults.esp32`. OTA channel `gl-s10/version.json`. `pio run` builds only the S3 (`default_envs`); `./deploy.sh -e gl-s10`.
+
 ## HTTP (auth unless noted)
 
 | Path | Notes |

@@ -58,6 +58,22 @@ Put the dashboard behind TLS if you want HTTPS: HAProxy (or similar) to `:80`. H
 | INT | 10 |
 | BOOT (hold 15 s) | 0 |
 
+### GL.iNet GL-S10
+
+The same firmware also builds for the GL.iNet GL-S10 (an original ESP32 with its own Ethernet MAC and an IP101 PHY, hardware v2.3): `pio run -e gl-s10`. Its update channel is `gl-s10/version.json` on the Pages site, so it never offers the S3 image.
+
+| GL-S10 | GPIO |
+|---|---|
+| MDC / MDIO | 23 / 18 |
+| RMII clock in | 0 |
+| PHY power | 5 (PHY address 1) |
+| Side RESET button (hold 15 s) | 33 |
+| Power LED / network LED (active low) | 14 / 32 |
+
+The network LED is on while Wi-Fi is associated with the Powerwall. The chip has no temperature sensor, so that tile shows "—". Ethernet keeps the chip's own MAC.
+
+Flashing over serial (`pio run -e gl-s10 -t upload`) writes the bootloader and partition table at the ESP32's offsets (bootloader at `0x1000`). A unit running ESPHome can instead take `.pio/build/gl-s10/firmware.bin` through ESPHome's OTA; it then keeps ESPHome's bootloader and partition table, which this firmware runs with. After that, `./deploy.sh -e gl-s10` updates it.
+
 ### Printed case
 
 A snap-fit ASA enclosure (no supports) with a wall mount is in [`case/`](case/). Vents are meant for **horizontal** wall install so heat rises through the grille.

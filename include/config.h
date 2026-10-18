@@ -44,6 +44,45 @@
 #define POWERWALL_IP_STR "192.168.91.1"
 #endif
 
+// ===== Board =====
+// The build target picks the board: ESP32-S3 is the Waveshare ESP32-S3-POE-ETH
+// (W5500 over SPI), ESP32 is the GL.iNet GL-S10 (internal EMAC + IP101 RMII PHY).
+#include "sdkconfig.h"
+#if CONFIG_IDF_TARGET_ESP32
+#define BOARD_GL_S10 1
+#define BOARD_NAME "GL.iNet GL-S10"
+#else
+#define BOARD_GL_S10 0
+#define BOARD_NAME "ESP32-S3-POE-ETH"
+#endif
+
+#if BOARD_GL_S10
+// ===== GL-S10 Ethernet (IP101, hardware v2.3) =====
+// RMII clock comes in on GPIO0 from the PHY (the ESP-IDF default for ESP32).
+#ifndef ETH_MDC_GPIO
+#define ETH_MDC_GPIO 23
+#endif
+#ifndef ETH_MDIO_GPIO
+#define ETH_MDIO_GPIO 18
+#endif
+#ifndef ETH_PHY_ADDR
+#define ETH_PHY_ADDR 1
+#endif
+// Drives the PHY's power/reset line high before the driver starts.
+#ifndef ETH_PHY_POWER_GPIO
+#define ETH_PHY_POWER_GPIO 5
+#endif
+
+// ===== GL-S10 LEDs (active low) =====
+#ifndef LED_POWER_GPIO
+#define LED_POWER_GPIO 14
+#endif
+// Network LED: on while Wi-Fi is associated with the Powerwall.
+#ifndef LED_NETWORK_GPIO
+#define LED_NETWORK_GPIO 32
+#endif
+#endif // BOARD_GL_S10
+
 // ===== W5500 SPI Pin Configuration =====
 // These are the correct pins for ESP32-S3-POE-ETH (Waveshare)
 #ifndef W5500_INT_GPIO
@@ -74,8 +113,21 @@
 #endif
 // Hold BOOT (GPIO0) this long after the firmware is running to force DHCP
 // and clear the admin password. Long enough that a bump will not trigger it.
+// On the GL-S10 GPIO0 is the RMII clock, so the side RESET button (GPIO33) is used.
 #ifndef ETH_BOOT_GPIO
+#if BOARD_GL_S10
+#define ETH_BOOT_GPIO 33
+#else
 #define ETH_BOOT_GPIO 0
+#endif
+#endif
+// What the dashboard and log call that button.
+#ifndef RECOVERY_BUTTON_NAME
+#if BOARD_GL_S10
+#define RECOVERY_BUTTON_NAME "RESET"
+#else
+#define RECOVERY_BUTTON_NAME "BOOT"
+#endif
 #endif
 #ifndef ETH_BOOT_HOLD_SEC
 #define ETH_BOOT_HOLD_SEC 15
@@ -185,7 +237,11 @@
 // https://<owner>.github.io/<repo>/version.json. Override in config.local.h
 // only if you host OTA somewhere else.
 #ifndef REMOTE_OTA_VERSION_URL
+#if BOARD_GL_S10
+#define REMOTE_OTA_VERSION_URL "https://mccahan.github.io/esp32-wifi-bridge/gl-s10/version.json"
+#else
 #define REMOTE_OTA_VERSION_URL "https://mccahan.github.io/esp32-wifi-bridge/version.json"
+#endif
 #endif
 
 // ===== Admin Web UI =====
@@ -210,7 +266,8 @@
 #define WEB_HTTP_PORT 80
 #endif
 
-// Maximum firmware size (must match partition size: 0x1C0000 = 1835008 bytes)
+// Maximum firmware size (must match partition size: 0x1C0000 = 1835008 bytes;
+// the same table fits the GL-S10's 4 MB flash)
 #ifndef OTA_MAX_FIRMWARE_SIZE
 #define OTA_MAX_FIRMWARE_SIZE 0x1C0000
 #endif

@@ -40,13 +40,14 @@ jobs:
           REPO="${GITHUB_REPOSITORY#*/}"
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "ota_url=https://${OWNER}.github.io/${REPO}/version.json" >> $GITHUB_OUTPUT
+          echo "gl_s10_ota_url=https://${OWNER}.github.io/${REPO}/gl-s10/version.json" >> $GITHUB_OUTPUT
           echo "Building version: ${VERSION}"
           echo "OTA URL: https://${OWNER}.github.io/${REPO}/version.json"
 
       - name: Build Firmware
         run: |
           for i in 1 2 3 4 5; do
-            if pio run; then
+            if pio run -e esp32-s3-devkitc-1; then
               exit 0
             fi
             echo "pio run failed (attempt $i), retrying..."
@@ -57,6 +58,21 @@ jobs:
           FIRMWARE_VERSION: ${{ steps.version.outputs.version }}
           REMOTE_OTA_VERSION_URL: ${{ steps.version.outputs.ota_url }}
 
+      # GL.iNet GL-S10 (original ESP32): its own OTA channel under gl-s10/
+      - name: Build GL-S10 Firmware
+        run: |
+          for i in 1 2 3 4 5; do
+            if pio run -e gl-s10; then
+              exit 0
+            fi
+            echo "pio run failed (attempt $i), retrying..."
+            sleep $((i * 15))
+          done
+          exit 1
+        env:
+          FIRMWARE_VERSION: ${{ steps.version.outputs.version }}
+          REMOTE_OTA_VERSION_URL: ${{ steps.version.outputs.gl_s10_ota_url }}
+
       - name: Prepare Artifacts
         run: |
           mkdir release
@@ -64,6 +80,10 @@ jobs:
           cp .pio/build/esp32-s3-devkitc-1/bootloader.bin release/
           cp .pio/build/esp32-s3-devkitc-1/partitions.bin release/
           cp .pio/build/esp32-s3-devkitc-1/ota_data_initial.bin release/
+          mkdir release/gl-s10
+          for f in firmware bootloader partitions ota_data_initial; do
+            cp .pio/build/gl-s10/$f.bin release/gl-s10/
+          done
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
@@ -71,11 +91,20 @@ jobs:
           name: firmware-${{ steps.version.outputs.version }}
           path: release/
 
+      - name: Name GL-S10 release files
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          mkdir release-files
+          cp release/*.bin release-files/
+          for f in release/gl-s10/*.bin; do
+            cp "$f" "release-files/gl-s10-$(basename "$f")"
+          done
+
       - name: Create Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: release/*
+          files: release-files/*
           generate_release_notes: true
           make_latest: true
 
@@ -103,20 +132,37 @@ jobs:
           REPO="${GITHUB_REPOSITORY#*/}"
           PAGES_BASE="https://${OWNER}.github.io/${REPO}"
 
-          PREV_VERSION="none"
-          PREV_SIZE="0"
           git fetch origin gh-pages --depth=1 || true
-          if git cat-file -e origin/gh-pages:firmware.bin 2>/dev/null; then
-            git show origin/gh-pages:firmware.bin > docs/firmware-previous.bin
-            PREV_SIZE=$(stat --printf="%s" docs/firmware-previous.bin)
-            if git cat-file -e origin/gh-pages:version.json 2>/dev/null; then
-              PREV_VERSION=$(git show origin/gh-pages:version.json | grep -o '"version"[^,]*' | cut -d'"' -f4 || echo "none")
+
+          # write_version <dir> <pages url of dir>: version.json with the previous build kept
+          write_version() {
+            local dir="$1" base="$2" prev_version="none" prev_size="0"
+            if git cat-file -e "origin/gh-pages:${dir}firmware.bin" 2>/dev/null; then
+              git show "origin/gh-pages:${dir}firmware.bin" > "docs/${dir}firmware-previous.bin"
+              prev_size=$(stat --printf="%s" "docs/${dir}firmware-previous.bin")
+              if git cat-file -e "origin/gh-pages:${dir}version.json" 2>/dev/null; then
+                prev_version=$(git show "origin/gh-pages:${dir}version.json" | grep -o '"version"[^,]*' | cut -d'"' -f4 || echo "none")
+              fi
             fi
-          fi
+            local size=$(stat --printf="%s" "docs/${dir}firmware.bin")
+            cat > "docs/${dir}version.json" << JSON
+          {
+            "version": "${VERSION}",
+            "size": ${size},
+            "url": "${base}/firmware.bin",
+            "previous_version": "${prev_version}",
+            "previous_size": ${prev_size},
+            "previous_url": "${base}/firmware-previous.bin"
+          }
+          JSON
+          }
 
           cp release/*.bin docs/
+          mkdir -p docs/gl-s10
+          cp release/gl-s10/*.bin docs/gl-s10/
+          write_version "" "${PAGES_BASE}"
+          write_version "gl-s10/" "${PAGES_BASE}/gl-s10"
           touch docs/.nojekyll
-          SIZE=$(stat --printf="%s" release/firmware.bin)
           sed -i "s|https://github.com/mccahan/esp32-wifi-bridge|https://github.com/${OWNER}/${REPO}|g" docs/index.html
 
           cat > docs/manifest.json << EOF
@@ -132,18 +178,15 @@ jobs:
                 {"path": "ota_data_initial.bin", "offset": 61440},
                 {"path": "firmware.bin", "offset": 131072}
               ]
+            }, {
+              "chipFamily": "ESP32",
+              "parts": [
+                {"path": "gl-s10/bootloader.bin", "offset": 4096},
+                {"path": "gl-s10/partitions.bin", "offset": 32768},
+                {"path": "gl-s10/ota_data_initial.bin", "offset": 61440},
+                {"path": "gl-s10/firmware.bin", "offset": 131072}
+              ]
             }]
-          }
-          EOF
-
-          cat > docs/version.json << EOF
-          {
-            "version": "${VERSION}",
-            "size": ${SIZE},
-            "url": "${PAGES_BASE}/firmware.bin",
-            "previous_version": "${PREV_VERSION}",
-            "previous_size": ${PREV_SIZE},
-            "previous_url": "${PAGES_BASE}/firmware-previous.bin"
           }
           EOF
 
