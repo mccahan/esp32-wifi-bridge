@@ -1,7 +1,8 @@
 /*
- * ESP32-S3 W5500 Ethernet WiFi Bridge (ESP-IDF)
+ * ESP32 WiFi-Ethernet Bridge (ESP-IDF)
  *
- * This implementation uses ESP-IDF native esp_eth driver with W5500 over SPI.
+ * This implementation uses ESP-IDF native esp_eth driver: W5500 over SPI on the
+ * ESP32-S3-POE-ETH, the internal EMAC with an IP101 PHY on the GL.iNet GL-S10.
  * Implements SSL/TLS passthrough proxy without decryption.
  * The proxy forwards encrypted traffic from Ethernet to WiFi and modifies TTL to hide external origin.
  */
@@ -35,7 +36,10 @@
 #include "esp_http_server.h"
 #include "esp_app_format.h"
 #include "esp_timer.h"
+#include "soc/soc_caps.h"
+#if SOC_TEMP_SENSOR_SUPPORTED
 #include "driver/temperature_sensor.h"
+#endif
 #include "esp_http_client.h"
 #include "esp_https_ota.h"
 #include "esp_crt_bundle.h"
@@ -122,7 +126,9 @@ static EventGroupHandle_t s_event_group;
 static volatile uint8_t cpu_usage_percent = 0;
 
 // On-die temperature (°C). chip_temp_ok is false until the first good sample.
+#if SOC_TEMP_SENSOR_SUPPORTED
 static temperature_sensor_handle_t temp_handle = NULL;
+#endif
 static volatile float chip_temp_c = 0;
 static volatile float chip_temp_max_c = 0;
 static volatile bool chip_temp_ok = false;
@@ -396,6 +402,11 @@ static void hash_admin_password(const char *password, const uint8_t salt[ADMIN_S
     memset(buf, 0, sizeof(buf));
 }
 
+#if !SOC_TEMP_SENSOR_SUPPORTED
+// The original ESP32 has no usable on-die sensor: the tile shows "—".
+static void init_temp_sensor(void) {}
+static void sample_chip_temp(void) { chip_temp_ok = false; }
+#else
 static void init_temp_sensor(void)
 {
     temperature_sensor_config_t cfg = TEMPERATURE_SENSOR_CONFIG_DEFAULT(-10, 80);
@@ -429,6 +440,7 @@ static void sample_chip_temp(void)
         }
     }
 }
+#endif // SOC_TEMP_SENSOR_SUPPORTED
 
 static const char *chip_temp_color(void)
 {
@@ -994,6 +1006,29 @@ static void eth_dhcp_fallback_task(void *pvParameters)
     vTaskDelete(NULL);
 }
 
+// ===== Board LEDs =====
+
+#if BOARD_GL_S10
+static void init_leds(void)
+{
+    gpio_config_t io = {
+        .pin_bit_mask = (1ULL << LED_POWER_GPIO) | (1ULL << LED_NETWORK_GPIO),
+        .mode = GPIO_MODE_OUTPUT,
+    };
+    gpio_config(&io);
+    gpio_set_level(LED_POWER_GPIO, 0);    // active low: on
+    gpio_set_level(LED_NETWORK_GPIO, 1);  // off until Wi-Fi is up
+}
+
+static void set_network_led(bool on)
+{
+    gpio_set_level(LED_NETWORK_GPIO, on ? 0 : 1);
+}
+#else
+static void init_leds(void) {}
+static void set_network_led(bool on) { (void)on; }
+#endif
+
 static void eth_boot_button_task(void *pvParameters)
 {
     (void)pvParameters;
@@ -1013,15 +1048,15 @@ static void eth_boot_button_task(void *pvParameters)
         if (gpio_get_level(ETH_BOOT_GPIO) == 0) {
             held_ticks++;
             if (held_ticks == 1) {
-                ESP_LOGI(TAG, "BOOT held - keep holding %d seconds to force DHCP and clear admin password",
+                ESP_LOGI(TAG, RECOVERY_BUTTON_NAME " held - keep holding %d seconds to force DHCP and clear admin password",
                          ETH_BOOT_HOLD_SEC);
             } else if (held_ticks < hold_ticks && (held_ticks * ETH_BOOT_POLL_MS) % 5000 == 0) {
-                ESP_LOGI(TAG, "BOOT held %ds / %ds",
+                ESP_LOGI(TAG, RECOVERY_BUTTON_NAME " held %ds / %ds",
                          (held_ticks * ETH_BOOT_POLL_MS) / 1000, ETH_BOOT_HOLD_SEC);
             }
             if (held_ticks >= hold_ticks) {
                 erase_admin_password();
-                request_dhcp_fallback_and_reboot("BOOT button held (DHCP + admin reset)");
+                request_dhcp_fallback_and_reboot(RECOVERY_BUTTON_NAME " button held (DHCP + admin reset)");
             }
         } else {
             held_ticks = 0;
@@ -1335,7 +1370,7 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
     httpd_resp_sendstr_chunk(req,
         "<div class=\"text-xs text-muted\" style=\"margin-bottom:0.75rem\">"
         "Device reboots to apply. If the gateway is unreachable for 45s with no LAN traffic, "
-        "it falls back to DHCP. Hold BOOT 15 seconds to force DHCP and clear the admin password.</div>"
+        "it falls back to DHCP. Hold " RECOVERY_BUTTON_NAME " 15 seconds to force DHCP and clear the admin password.</div>"
         "<button type=\"submit\" class=\"btn btn-primary\">" ICON_SAVE " Save & Reboot</button>"
         "</form></div>");
 
@@ -1440,7 +1475,7 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
         "<form method=\"POST\" action=\"/logout\">"
         "<button type=\"submit\" class=\"btn btn-secondary\">Sign out</button></form></div>"
         "<hr><details class=\"adminpw\"><summary><h2>" ICON_LOCK " Admin password " ICON_EXPAND "</h2></summary>"
-        "<p class=\"text-xs text-muted\" style=\"margin-bottom:0.75rem\">Username is <code>admin</code>. Hold BOOT 15 seconds to clear the password if you get locked out.</p>"
+        "<p class=\"text-xs text-muted\" style=\"margin-bottom:0.75rem\">Username is <code>admin</code>. Hold " RECOVERY_BUTTON_NAME " 15 seconds to clear the password if you get locked out.</p>"
         "<form method=\"POST\" action=\"/admin/password\">"
         "<div class=\"form-group\"><label class=\"label\">Current password</label>"
         "<input type=\"password\" name=\"current\" autocomplete=\"current-password\" class=\"mt-1\"></div>"
@@ -2020,7 +2055,7 @@ static esp_err_t eth_save_handler(httpd_req_t *req)
         "<h2>Applying Ethernet settings</h2>"
         "<p>Rebooting. New address: <strong>%s</strong></p>"
         "<p class=\"text-sm\">If the gateway is unreachable for 45s, the device falls back to DHCP. "
-        "Hold BOOT 15 seconds to force DHCP. mDNS: <a href=\"http://powerwall.local/\">powerwall.local</a></p>"
+        "Hold " RECOVERY_BUTTON_NAME " 15 seconds to force DHCP. mDNS: <a href=\"http://powerwall.local/\">powerwall.local</a></p>"
         "</div></body></html>",
         use_static ? ip : "powerwall.local", new_addr);
 
@@ -2733,7 +2768,7 @@ static esp_err_t admin_setup_handler(httpd_req_t *req)
     httpd_resp_sendstr_chunk(req,
         "<p>You are signed in as <code>" ADMIN_USERNAME "</code>.</p>"
         "<p class=\"text-xs text-muted\" style=\"margin:0.75rem 0\">"
-        "If you forget the password, hold BOOT for 15 seconds to clear it (also forces DHCP).</p>"
+        "If you forget the password, hold " RECOVERY_BUTTON_NAME " for 15 seconds to clear it (also forces DHCP).</p>"
         "<p><a class=\"btn btn-primary\" href=\"/\" style=\"display:inline-block;text-decoration:none;margin-top:0.75rem\">Continue to dashboard</a></p>");
     send_simple_page_end(req);
     return ESP_OK;
@@ -3054,6 +3089,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
     } else if (event_id == WIFI_EVENT_STA_DISCONNECTED) {
         ESP_LOGI(TAG, "WiFi disconnected, retrying...");
         xEventGroupClearBits(s_event_group, WIFI_CONNECTED_BIT);
+        set_network_led(false);
         esp_wifi_connect();
     }
 }
@@ -3065,15 +3101,16 @@ static void wifi_got_ip_handler(void *arg, esp_event_base_t event_base,
     ip_event_got_ip_t *event = (ip_event_got_ip_t *) event_data;
     ESP_LOGI(TAG, "WiFi got IP:" IPSTR, IP2STR(&event->ip_info.ip));
     xEventGroupSetBits(s_event_group, WIFI_CONNECTED_BIT);
+    set_network_led(true);
     wifi_was_up = true;
     /* Tesla DHCP just overwrote lwIP DNS with 192.168.91.1. Put LAN DNS back. */
     remote_ota_apply_eth_dns();
 }
 
-/** Initialize W5500 Ethernet */
+/** Initialize Ethernet (W5500 or the internal EMAC, by board) */
 static esp_err_t init_ethernet(void)
 {
-    ESP_LOGI(TAG, "Initializing Ethernet W5500...");
+    ESP_LOGI(TAG, "Initializing Ethernet (%s)...", BOARD_GL_S10 ? "IP101" : "W5500");
 
     // Create event group
     s_event_group = xEventGroupCreate();
@@ -3101,6 +3138,39 @@ static esp_err_t init_ethernet(void)
     ESP_ERROR_CHECK(esp_event_handler_register(ETH_EVENT, ESP_EVENT_ANY_ID, &eth_event_handler, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_GOT_IP, &got_ip_event_handler, NULL));
 
+    uint8_t mac_addr[6];
+#if BOARD_GL_S10
+    // Internal EMAC with the IP101 PHY. ETH_ESP32_EMAC_DEFAULT_CONFIG already
+    // takes the RMII clock in on GPIO0; set the SMI pins explicitly anyway.
+    gpio_config_t phy_power = {
+        .pin_bit_mask = 1ULL << ETH_PHY_POWER_GPIO,
+        .mode = GPIO_MODE_OUTPUT,
+    };
+    gpio_config(&phy_power);
+    gpio_set_level(ETH_PHY_POWER_GPIO, 1);
+    vTaskDelay(pdMS_TO_TICKS(10));
+
+    eth_mac_config_t mac_config = ETH_MAC_DEFAULT_CONFIG();
+    eth_esp32_emac_config_t emac_config = ETH_ESP32_EMAC_DEFAULT_CONFIG();
+    emac_config.smi_gpio.mdc_num = ETH_MDC_GPIO;
+    emac_config.smi_gpio.mdio_num = ETH_MDIO_GPIO;
+
+    eth_phy_config_t phy_config = ETH_PHY_DEFAULT_CONFIG();
+    phy_config.phy_addr = ETH_PHY_ADDR;
+    phy_config.reset_gpio_num = -1;
+
+    esp_eth_mac_t *mac = esp_eth_mac_new_esp32(&emac_config, &mac_config);
+    esp_eth_phy_t *phy = esp_eth_phy_new_ip101(&phy_config);
+
+    esp_eth_config_t config = ETH_DEFAULT_CONFIG(mac, phy);
+    ESP_ERROR_CHECK(esp_eth_driver_install(&config, &eth_handle));
+
+    // The EMAC uses the chip's own Ethernet MAC (base + 3), the address the
+    // LAN already knows this device by.
+    ESP_ERROR_CHECK(esp_read_mac(mac_addr, ESP_MAC_ETH));
+    ESP_LOGI(TAG, "Ethernet MAC: %02x:%02x:%02x:%02x:%02x:%02x",
+             mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5]);
+#else
     // Configure SPI bus
     spi_bus_config_t buscfg = {
         .mosi_io_num = W5500_MOSI_GPIO,
@@ -3146,7 +3216,6 @@ static esp_err_t init_ethernet(void)
 
     // Clone MAC address from the built-in WiFi interface
     // W5500 doesn't have a burned-in MAC, so we derive one from the chip's base MAC
-    uint8_t mac_addr[6];
     ESP_ERROR_CHECK(esp_read_mac(mac_addr, ESP_MAC_WIFI_STA));
     // Modify locally-administered bit to indicate this is a derived address
     // This ensures the Ethernet MAC is unique but related to the WiFi MAC
@@ -3154,6 +3223,7 @@ static esp_err_t init_ethernet(void)
     ESP_ERROR_CHECK(esp_eth_ioctl(eth_handle, ETH_CMD_S_MAC_ADDR, mac_addr));
     ESP_LOGI(TAG, "Ethernet MAC (derived from WiFi): %02x:%02x:%02x:%02x:%02x:%02x",
              mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5]);
+#endif
 
     // Set hostname for DHCP (powerwall-XXXX using last 2 bytes of MAC)
     char hostname[32];
@@ -3511,7 +3581,7 @@ void app_main(void)
     // Initialize log capture early to capture startup logs
     init_log_capture();
 
-    ESP_LOGI(TAG, "=== ESP32-S3-POE-ETH WiFi-Ethernet SSL Bridge ===");
+    ESP_LOGI(TAG, "=== " BOARD_NAME " WiFi-Ethernet SSL Bridge ===");
     ESP_LOGI(TAG, "Mode: SSL Passthrough (no decryption, TTL modification)");
     ESP_LOGI(TAG, "Target: Tesla Powerwall at %s:443", POWERWALL_IP_STR);
 
@@ -3527,6 +3597,7 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(ret);
 
+    init_leds();
     load_admin_config();
     init_temp_sensor();
     sample_chip_temp();
